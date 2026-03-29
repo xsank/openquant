@@ -4,9 +4,13 @@
 """
 from __future__ import annotations
 
+import logging
+
 from openquant.core.models import Bar, Order, Portfolio
 from openquant.strategy.base import BaseStrategy
 from openquant.utils.indicators import moving_average
+
+logger = logging.getLogger(__name__)
 
 
 class MACrossStrategy(BaseStrategy):
@@ -33,6 +37,11 @@ class MACrossStrategy(BaseStrategy):
 
         close_series = self.get_close_series(bar.symbol)
         if len(close_series) < self.long_window + 1:
+            logger.debug(
+                "数据不足，需要至少 %d 根K线，当前仅 %d 根，跳过信号计算",
+                self.long_window + 1,
+                len(close_series),
+            )
             return orders
 
         short_ma = moving_average(close_series, self.short_window)
@@ -51,6 +60,11 @@ class MACrossStrategy(BaseStrategy):
             quantity = self.calculate_max_buyable(bar.close, available_cash)
             if quantity > 0:
                 orders.append(self.create_buy_order(bar.symbol, bar.close, quantity, bar.market))
+            else:
+                logger.warning(
+                    "金叉信号触发但资金不足: %s 价格=%.2f, 可用资金=%.2f, 买入1手需=%.2f",
+                    bar.symbol, bar.close, available_cash, bar.close * 100,
+                )
 
         # 死叉卖出
         elif prev_short >= prev_long and current_short < current_long and has_position:

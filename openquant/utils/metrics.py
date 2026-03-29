@@ -59,7 +59,7 @@ def calculate_metrics(equity_curve: pd.Series, risk_free_rate: float = 0.03) -> 
         "win_rate": round(win_rate * 100, 2),
         "profit_loss_ratio": round(profit_loss_ratio, 4),
         "total_trading_days": total_days,
-        "total_trades": total_trading_days,
+        "total_trades": 0,
     }
 
 
