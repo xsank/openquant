@@ -17,8 +17,16 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # 配置中文字体支持
-plt.rcParams["font.sans-serif"] = ["SimHei", "DejaVu Sans", "Arial Unicode MS", "sans-serif"]
+import matplotlib.font_manager as fm
+
+_CHINESE_FONT_PATH = "/usr/share/fonts/google-droid/DroidSansFallback.ttf"
+_CHINESE_FONT_PROP = fm.FontProperties(fname=_CHINESE_FONT_PATH)
+fm.fontManager.addfont(_CHINESE_FONT_PATH)
+_FONT_NAME = _CHINESE_FONT_PROP.get_name()
+
+plt.rcParams["font.sans-serif"] = [_FONT_NAME, "DejaVu Sans", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["font.family"] = "sans-serif"
 
 
 def plot_equity_curve(
