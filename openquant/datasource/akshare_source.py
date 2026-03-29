@@ -185,6 +185,8 @@ def _fetch_a_share_daily(symbol: str, start_date: str, end_date: str) -> pd.Data
         end_date=end_date.replace("-", ""),
         adjust="qfq",
     )
+    if df is None or df.empty:
+        raise DataSourceError(f"未获取到A股数据，请检查股票代码: {symbol}")
     return _normalize_columns(df)
 
 
@@ -196,17 +198,88 @@ def _fetch_hk_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame
         end_date=end_date.replace("-", ""),
         adjust="qfq",
     )
+    if df is None or df.empty:
+        raise DataSourceError(f"未获取到港股数据，请检查股票代码: {symbol}")
     return _normalize_columns(df)
 
 
+def _resolve_us_symbol(symbol: str) -> str:
+    """将用户输入的美股代码转换为 AKShare 所需的带交易所前缀格式。
+
+    AKShare 的 stock_us_hist 接口要求 symbol 格式为 "105.GOOGL"（交易所编号.股票代码），
+    东方财富使用的交易所编号：105=NASDAQ, 106=NYSE, 107=AMEX。
+
+    解析策略（按优先级）：
+    1. 用户已传入带前缀的格式（如 "105.GOOGL"）→ 直接使用
+    2. 通过东方财富搜索接口精确匹配股票代码 → 获取正确的 QuoteID
+    3. 搜索接口不可用时，依次尝试三大交易所前缀（105/106/107）
+    """
+    if "." in symbol:
+        return symbol
+
+    upper_symbol = symbol.upper()
+
+    quote_id = _search_us_quote_id(upper_symbol)
+    if quote_id:
+        return quote_id
+
+    logger.warning("无法通过搜索接口解析美股代码 %s，将依次尝试各交易所前缀", upper_symbol)
+    for exchange_prefix in _US_EXCHANGE_PREFIXES:
+        candidate = f"{exchange_prefix}.{upper_symbol}"
+        try:
+            df = ak.stock_us_hist(symbol=candidate, period="daily", adjust="qfq")
+            if df is not None and not df.empty:
+                logger.info("通过尝试确认美股代码: %s", candidate)
+                return candidate
+        except Exception:
+            continue
+
+    raise DataSourceError(
+        f"无法解析美股代码: {symbol}，请使用带交易所前缀的格式（如 105.{upper_symbol}）"
+    )
+
+
+# 东方财富交易所编号: 105=NASDAQ, 106=NYSE, 107=AMEX
+_US_EXCHANGE_PREFIXES = ("105", "106", "107")
+
+
+def _search_us_quote_id(symbol: str) -> str | None:
+    """通过东方财富搜索接口查找美股的完整 QuoteID。
+
+    该接口轻量快速，无需拉取全量美股列表，返回精确匹配的 QuoteID（如 "105.GOOGL"）。
+    """
+    import requests
+
+    search_url = "https://searchapi.eastmoney.com/api/suggest/get"
+    params = {
+        "input": symbol,
+        "type": "14",
+        "token": "D43BF722C8E33BDC906FB84D85E326E8",
+        "count": "10",
+    }
+    try:
+        response = requests.get(search_url, params=params, timeout=10)
+        data = response.json()
+        suggestions = data.get("QuotationCodeTable", {}).get("Data") or []
+        for item in suggestions:
+            if item.get("Code", "").upper() == symbol and item.get("SecurityTypeName") == "美股":
+                return item["QuoteID"]
+    except Exception:
+        logger.debug("东方财富搜索接口调用失败，symbol=%s", symbol)
+    return None
+
+
 def _fetch_us_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    full_symbol = _resolve_us_symbol(symbol)
     df = ak.stock_us_hist(
-        symbol=symbol,
+        symbol=full_symbol,
         period="daily",
         start_date=start_date.replace("-", ""),
         end_date=end_date.replace("-", ""),
         adjust="qfq",
     )
+    if df is None or df.empty:
+        raise DataSourceError(f"未获取到美股数据，请检查股票代码: {symbol} (解析为 {full_symbol})")
     return _normalize_columns(df)
 
 
@@ -218,6 +291,8 @@ def _fetch_fund_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFra
         end_date=end_date.replace("-", ""),
         adjust="qfq",
     )
+    if df is None or df.empty:
+        raise DataSourceError(f"未获取到基金数据，请检查基金代码: {symbol}")
     return _normalize_columns(df)
 
 
