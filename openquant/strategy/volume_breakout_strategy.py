@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from openquant.core.models import Bar, Order, Portfolio
+from openquant.risk.stop_loss import StopLossConfig
 from openquant.strategy.base import BaseStrategy
 from openquant.utils.indicators import moving_average
 
@@ -23,6 +24,7 @@ class VolumeBreakoutStrategy(BaseStrategy):
         volume_ma_period: int = 20,
         volume_multiplier: float = 1.5,
         position_ratio: float = 0.9,
+        stop_loss_config: StopLossConfig | None = None,
     ):
         """
         Args:
@@ -30,8 +32,9 @@ class VolumeBreakoutStrategy(BaseStrategy):
             volume_ma_period: 成交量均线周期
             volume_multiplier: 成交量放大倍数阈值
             position_ratio: 仓位比例 (0~1)
+            stop_loss_config: 止损止盈配置
         """
-        super().__init__()
+        super().__init__(stop_loss_config=stop_loss_config)
         self.ma_period = ma_period
         self.volume_ma_period = volume_ma_period
         self.volume_multiplier = volume_multiplier

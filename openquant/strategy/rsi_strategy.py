@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from openquant.core.models import Bar, Order, Portfolio
+from openquant.risk.stop_loss import StopLossConfig
 from openquant.strategy.base import BaseStrategy
 from openquant.utils.indicators import rsi
 
@@ -19,6 +20,7 @@ class RSIReversalStrategy(BaseStrategy):
         oversold: float = 30.0,
         overbought: float = 70.0,
         position_ratio: float = 0.9,
+        stop_loss_config: StopLossConfig | None = None,
     ):
         """
         Args:
@@ -26,8 +28,9 @@ class RSIReversalStrategy(BaseStrategy):
             oversold: 超卖阈值，RSI 低于此值视为超卖
             overbought: 超买阈值，RSI 高于此值视为超买
             position_ratio: 仓位比例 (0~1)
+            stop_loss_config: 止损止盈配置
         """
-        super().__init__()
+        super().__init__(stop_loss_config=stop_loss_config)
         self.rsi_period = rsi_period
         self.oversold = oversold
         self.overbought = overbought

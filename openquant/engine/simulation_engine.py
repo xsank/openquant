@@ -25,6 +25,8 @@ from openquant.core.models import (
     Position,
     TradeRecord,
 )
+from openquant.risk.risk_manager import RiskManager
+from openquant.risk.stop_loss import StopLossConfig, StopLossManager
 from openquant.storage.sqlite_storage import SqliteStorage
 from openquant.utils.metrics import calculate_metrics
 
@@ -47,6 +49,8 @@ class SimulationEngine(EngineInterface):
         poll_interval: int = 60,
         max_rounds: int = 0,
         storage: SqliteStorage | None = None,
+        stop_loss_config: StopLossConfig | None = None,
+        risk_manager: RiskManager | None = None,
     ):
         """
         Args:
@@ -57,6 +61,8 @@ class SimulationEngine(EngineInterface):
             poll_interval: 行情轮询间隔（秒）
             max_rounds: 最大轮询次数，0 表示无限循环直到手动停止
             storage: 存储实例（可选）
+            stop_loss_config: 止损止盈配置（可选）
+            risk_manager: 风控管理器（可选）
         """
         self.data_source = data_source
         self.initial_capital = initial_capital
@@ -71,6 +77,8 @@ class SimulationEngine(EngineInterface):
         self._equity_curve: list[tuple[datetime, float]] = []
         self._watch_list: list[tuple[str, MarketType]] = []
         self._running = False
+        self._stop_loss_manager = StopLossManager(stop_loss_config)
+        self._risk_manager = risk_manager
 
     def set_strategy(self, strategy: StrategyInterface) -> None:
         self._strategy = strategy
@@ -91,6 +99,9 @@ class SimulationEngine(EngineInterface):
             cash=self.initial_capital,
         )
         self._equity_curve.clear()
+        self._stop_loss_manager.reset()
+        if self._risk_manager:
+            self._risk_manager.reset()
         self._strategy.initialize(self._portfolio)
         self._running = True
 
@@ -175,11 +186,28 @@ class SimulationEngine(EngineInterface):
                 if symbol in self._portfolio.positions:
                     self._portfolio.positions[symbol].current_price = bar.close
 
+                # 更新风控每日状态
+                if self._risk_manager:
+                    self._risk_manager.update_daily_state(now, self._portfolio)
+
+                # 检查止损止盈
+                stop_orders = self._stop_loss_manager.check_stop(
+                    bar, self._portfolio, self._create_sell_order,
+                )
+                for stop_order in stop_orders:
+                    self._execute_order(stop_order, bar)
+
                 # 策略生成订单
                 orders = self._strategy.on_bar(bar, self._portfolio)
 
                 # 执行订单
                 for order in orders:
+                    if self._risk_manager:
+                        passed, reason = self._risk_manager.check_order(order, bar, self._portfolio)
+                        if not passed:
+                            order.status = OrderStatus.REJECTED
+                            logger.warning("风控拦截订单: %s - %s", order.order_id, reason)
+                            continue
                     self._execute_order(order, bar)
 
             except DataSourceError as exc:
@@ -248,6 +276,10 @@ class SimulationEngine(EngineInterface):
         )
         self._portfolio.trade_history.append(trade)
         self._strategy.on_order_filled(order, self._portfolio)
+        # 通知止损管理器
+        self._stop_loss_manager.on_order_filled(order.symbol, OrderSide.BUY, fill_price)
+        if self._risk_manager:
+            self._risk_manager.on_trade_result(True)
         logger.info("模拟买入: %s %d股 @ %.2f", order.symbol, order.quantity, fill_price)
 
     def _execute_sell(self, order: Order, bar: Bar) -> None:
@@ -256,6 +288,7 @@ class SimulationEngine(EngineInterface):
             raise InsufficientPositionError(f"无持仓: {order.symbol}")
 
         pos = self._portfolio.positions[order.symbol]
+        entry_avg_cost = pos.avg_cost
         if pos.quantity < order.quantity:
             raise InsufficientPositionError(
                 f"持仓不足: 持有 {pos.quantity}, 卖出 {order.quantity}"
@@ -290,4 +323,27 @@ class SimulationEngine(EngineInterface):
         )
         self._portfolio.trade_history.append(trade)
         self._strategy.on_order_filled(order, self._portfolio)
+        # 通知止损管理器
+        self._stop_loss_manager.on_order_filled(order.symbol, OrderSide.SELL, fill_price)
+        if self._risk_manager:
+            is_profitable = fill_price > entry_avg_cost
+            self._risk_manager.on_trade_result(is_profitable)
         logger.info("模拟卖出: %s %d股 @ %.2f", order.symbol, order.quantity, fill_price)
+
+    def _create_sell_order(
+        self,
+        symbol: str,
+        price: float,
+        quantity: int,
+        market: MarketType = MarketType.A_SHARE,
+    ) -> Order:
+        """创建卖出订单（供止损止盈管理器使用）"""
+        return Order(
+            order_id=str(uuid.uuid4())[:8],
+            symbol=symbol,
+            side=OrderSide.SELL,
+            price=price,
+            quantity=quantity,
+            created_at=datetime.now(),
+            market=market,
+        )

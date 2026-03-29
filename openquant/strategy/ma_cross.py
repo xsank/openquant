@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 
 from openquant.core.models import Bar, Order, Portfolio
+from openquant.risk.stop_loss import StopLossConfig
 from openquant.strategy.base import BaseStrategy
 from openquant.utils.indicators import moving_average
 
@@ -16,14 +17,15 @@ logger = logging.getLogger(__name__)
 class MACrossStrategy(BaseStrategy):
     """双均线交叉策略"""
 
-    def __init__(self, short_window: int = 5, long_window: int = 20, position_ratio: float = 0.9):
+    def __init__(self, short_window: int = 5, long_window: int = 20, position_ratio: float = 0.9, stop_loss_config: StopLossConfig | None = None):
         """
         Args:
             short_window: 短期均线周期
             long_window: 长期均线周期
             position_ratio: 仓位比例 (0~1)
+            stop_loss_config: 止损止盈配置
         """
-        super().__init__()
+        super().__init__(stop_loss_config=stop_loss_config)
         self.short_window = short_window
         self.long_window = long_window
         self.position_ratio = position_ratio

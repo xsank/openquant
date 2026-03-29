@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from openquant.core.models import Bar, Order, Portfolio
+from openquant.risk.stop_loss import StopLossConfig
 from openquant.strategy.base import BaseStrategy
 from openquant.utils.indicators import atr, donchian_channel
 
@@ -24,6 +25,7 @@ class TurtleStrategy(BaseStrategy):
         atr_period: int = 20,
         risk_ratio: float = 0.02,
         position_ratio: float = 0.9,
+        stop_loss_config: StopLossConfig | None = None,
     ):
         """
         Args:
@@ -32,8 +34,9 @@ class TurtleStrategy(BaseStrategy):
             atr_period: ATR 计算周期
             risk_ratio: 单笔风险占总资金比例
             position_ratio: 最大仓位比例 (0~1)
+            stop_loss_config: 止损止盈配置
         """
-        super().__init__()
+        super().__init__(stop_loss_config=stop_loss_config)
         self.entry_period = entry_period
         self.exit_period = exit_period
         self.atr_period = atr_period

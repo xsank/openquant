@@ -1,6 +1,7 @@
 """回测引擎
 
 基于历史数据驱动策略执行，模拟交易过程并记录绩效。
+支持止损止盈和风控规则。
 """
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ from openquant.core.models import (
     Position,
     TradeRecord,
 )
+from openquant.risk.risk_manager import RiskManager
+from openquant.risk.stop_loss import StopLossConfig, StopLossManager
 from openquant.storage.sqlite_storage import SqliteStorage
 from openquant.utils.metrics import calculate_metrics
 
@@ -38,6 +41,8 @@ class BacktestEngine(EngineInterface):
         commission_rate: float = 0.0003,
         slippage_rate: float = 0.001,
         storage: SqliteStorage | None = None,
+        stop_loss_config: StopLossConfig | None = None,
+        risk_manager: RiskManager | None = None,
     ):
         self.initial_capital = initial_capital
         self.commission_rate = commission_rate
@@ -48,6 +53,8 @@ class BacktestEngine(EngineInterface):
         self._portfolio: Portfolio | None = None
         self._equity_curve: list[tuple[datetime, float]] = []
         self._data_feeds: list[tuple[str, pd.DataFrame, MarketType]] = []
+        self._stop_loss_manager = StopLossManager(stop_loss_config)
+        self._risk_manager = risk_manager
 
     def set_strategy(self, strategy: StrategyInterface) -> None:
         self._strategy = strategy
@@ -82,6 +89,9 @@ class BacktestEngine(EngineInterface):
             cash=self.initial_capital,
         )
         self._equity_curve.clear()
+        self._stop_loss_manager.reset()
+        if self._risk_manager:
+            self._risk_manager.reset()
         self._strategy.initialize(self._portfolio)
 
         # 合并所有数据并按时间排序
@@ -96,11 +106,28 @@ class BacktestEngine(EngineInterface):
             # 更新持仓市价
             self._update_position_price(bar)
 
+            # 更新风控每日状态
+            if self._risk_manager:
+                self._risk_manager.update_daily_state(bar.datetime, self._portfolio)
+
+            # 检查止损止盈（优先于策略信号）
+            stop_orders = self._stop_loss_manager.check_stop(
+                bar, self._portfolio, self._create_sell_order,
+            )
+            for order in stop_orders:
+                self._execute_order(order, bar)
+
             # 策略生成订单
             orders = self._strategy.on_bar(bar, self._portfolio)
 
-            # 执行订单
+            # 风控检查 + 执行订单
             for order in orders:
+                if self._risk_manager:
+                    passed, reason = self._risk_manager.check_order(order, bar, self._portfolio)
+                    if not passed:
+                        order.status = OrderStatus.REJECTED
+                        logger.warning("风控拦截订单: %s - %s", order.order_id, reason)
+                        continue
                 self._execute_order(order, bar)
 
             # 记录权益曲线
@@ -230,6 +257,13 @@ class BacktestEngine(EngineInterface):
         self._portfolio.trade_history.append(trade)
         self._strategy.on_order_filled(order, self._portfolio)
 
+        # 通知止损管理器
+        self._stop_loss_manager.on_order_filled(order.symbol, OrderSide.BUY, fill_price)
+
+        # 通知风控管理器
+        if self._risk_manager:
+            self._risk_manager.on_trade_result(True)
+
         logger.debug("买入成交: %s %d股 @ %.2f, 佣金=%.2f", order.symbol, order.quantity, fill_price, commission)
 
     def _execute_sell(self, order: Order, bar: Bar) -> None:
@@ -242,6 +276,9 @@ class BacktestEngine(EngineInterface):
             raise InsufficientPositionError(
                 f"持仓不足: 持有 {pos.quantity}, 卖出 {order.quantity}"
             )
+
+        # 保存成本价（在持仓可能被删除前）
+        entry_avg_cost = pos.avg_cost
 
         # 考虑滑点
         fill_price = order.price * (1 - self.slippage_rate)
@@ -277,4 +314,30 @@ class BacktestEngine(EngineInterface):
         self._portfolio.trade_history.append(trade)
         self._strategy.on_order_filled(order, self._portfolio)
 
+        # 通知止损管理器
+        self._stop_loss_manager.on_order_filled(order.symbol, OrderSide.SELL, fill_price)
+
+        # 通知风控管理器（判断本次卖出是否盈利）
+        if self._risk_manager:
+            is_profitable = fill_price > entry_avg_cost
+            self._risk_manager.on_trade_result(is_profitable)
+
         logger.debug("卖出成交: %s %d股 @ %.2f, 佣金=%.2f", order.symbol, order.quantity, fill_price, commission)
+
+    def _create_sell_order(
+        self,
+        symbol: str,
+        price: float,
+        quantity: int,
+        market: MarketType = MarketType.A_SHARE,
+    ) -> Order:
+        """创建卖出订单（供止损止盈管理器使用）"""
+        return Order(
+            order_id=str(uuid.uuid4())[:8],
+            symbol=symbol,
+            side=OrderSide.SELL,
+            price=price,
+            quantity=quantity,
+            created_at=datetime.now(),
+            market=market,
+        )

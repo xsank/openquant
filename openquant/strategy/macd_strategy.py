@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from openquant.core.models import Bar, Order, Portfolio
+from openquant.risk.stop_loss import StopLossConfig
 from openquant.strategy.base import BaseStrategy
 from openquant.utils.indicators import macd
 
@@ -18,8 +19,9 @@ class MACDStrategy(BaseStrategy):
         slow_period: int = 26,
         signal_period: int = 9,
         position_ratio: float = 0.9,
+        stop_loss_config: StopLossConfig | None = None,
     ):
-        super().__init__()
+        super().__init__(stop_loss_config=stop_loss_config)
         self.fast_period = fast_period
         self.slow_period = slow_period
         self.signal_period = signal_period

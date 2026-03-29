@@ -41,8 +41,14 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     loss = (-delta).where(delta < 0, 0.0)
     avg_gain = gain.rolling(window=period, min_periods=1).mean()
     avg_loss = loss.rolling(window=period, min_periods=1).mean()
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    return 100 - (100 / (1 + rs))
+    # When avg_loss is 0 (pure uptrend), RSI should be 100
+    # When avg_gain is 0 (pure downtrend), RSI should be 0
+    rsi_values = pd.Series(np.where(
+        avg_loss == 0,
+        np.where(avg_gain == 0, 50.0, 100.0),
+        100 - (100 / (1 + avg_gain / avg_loss)),
+    ), index=series.index)
+    return rsi_values
 
 
 def bollinger_bands(

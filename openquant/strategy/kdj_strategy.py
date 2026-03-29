@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from openquant.core.models import Bar, Order, Portfolio
+from openquant.risk.stop_loss import StopLossConfig
 from openquant.strategy.base import BaseStrategy
 from openquant.utils.indicators import kdj
 
@@ -24,6 +25,7 @@ class KDJStrategy(BaseStrategy):
         oversold: float = 20.0,
         overbought: float = 80.0,
         position_ratio: float = 0.9,
+        stop_loss_config: StopLossConfig | None = None,
     ):
         """
         Args:
@@ -33,8 +35,9 @@ class KDJStrategy(BaseStrategy):
             oversold: 超卖阈值
             overbought: 超买阈值
             position_ratio: 仓位比例 (0~1)
+            stop_loss_config: 止损止盈配置
         """
-        super().__init__()
+        super().__init__(stop_loss_config=stop_loss_config)
         self.fastk_period = fastk_period
         self.slowk_period = slowk_period
         self.slowd_period = slowd_period

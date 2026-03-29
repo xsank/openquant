@@ -19,14 +19,16 @@ from openquant.core.models import (
     OrderStatus,
     Portfolio,
 )
+from openquant.risk.stop_loss import StopLossConfig, StopLossManager
 
 
 class BaseStrategy(StrategyInterface):
     """策略基类，提供常用辅助方法"""
 
-    def __init__(self):
+    def __init__(self, stop_loss_config: StopLossConfig | None = None):
         self._bar_history: dict[str, list[Bar]] = defaultdict(list)
         self._current_bar: Bar | None = None
+        self._stop_loss_config = stop_loss_config
 
     def initialize(self, portfolio: Portfolio) -> None:
         self._bar_history.clear()
@@ -110,3 +112,12 @@ class BaseStrategy(StrategyInterface):
             return 0
         max_shares = int(cash / price)
         return (max_shares // lot_size) * lot_size
+
+    @property
+    def stop_loss_config(self) -> StopLossConfig | None:
+        """获取止损止盈配置"""
+        return self._stop_loss_config
+
+    @stop_loss_config.setter
+    def stop_loss_config(self, value: StopLossConfig | None) -> None:
+        self._stop_loss_config = value
