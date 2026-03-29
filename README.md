@@ -57,7 +57,7 @@ Warning! you should know exactly what you are doing!
 
 ### 2.3 Batch Analysis
 
-支持多标的 × 多策略的批量回测，自动生成对比图表：
+Support batch backtesting of multiple targets × multiple strategies, and automatically generate comparison charts:
 
 ```bash
 python -m openquant.main batch_backtest \
