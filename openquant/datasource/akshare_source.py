@@ -131,6 +131,26 @@ class AkshareDataSource(DataSourceInterface):
                     "open": float(row.get("今开", 0)),
                     "prev_close": float(row.get("昨收", 0)),
                 }
+            elif market == MarketType.HK_STOCK:
+                from datetime import datetime as dt, timedelta
+                end = dt.now().strftime("%Y%m%d")
+                start = (dt.now() - timedelta(days=7)).strftime("%Y%m%d")
+                df = ak.stock_hk_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
+                if df.empty:
+                    raise DataSourceError(f"未获取到港股行情: {symbol}")
+                row = df.iloc[-1]
+                return {
+                    "symbol": symbol,
+                    "name": "",
+                    "price": float(row.get("收盘", 0)),
+                    "change_pct": float(row.get("涨跌幅", 0)),
+                    "volume": float(row.get("成交量", 0)),
+                    "amount": float(row.get("成交额", 0)),
+                    "high": float(row.get("最高", 0)),
+                    "low": float(row.get("最低", 0)),
+                    "open": float(row.get("开盘", 0)),
+                    "prev_close": float(row.get("收盘", 0)),
+                }
             else:
                 raise DataSourceError(f"实时行情暂不支持市场: {market}")
         except DataSourceError:

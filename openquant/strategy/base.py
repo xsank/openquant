@@ -44,6 +44,21 @@ class BaseStrategy(StrategyInterface):
         bars = self._bar_history.get(symbol, [])
         return pd.Series([b.close for b in bars])
 
+    def get_high_series(self, symbol: str) -> pd.Series:
+        """获取指定标的的最高价序列"""
+        bars = self._bar_history.get(symbol, [])
+        return pd.Series([b.high for b in bars])
+
+    def get_low_series(self, symbol: str) -> pd.Series:
+        """获取指定标的的最低价序列"""
+        bars = self._bar_history.get(symbol, [])
+        return pd.Series([b.low for b in bars])
+
+    def get_open_series(self, symbol: str) -> pd.Series:
+        """获取指定标的的开盘价序列"""
+        bars = self._bar_history.get(symbol, [])
+        return pd.Series([b.open for b in bars])
+
     def get_volume_series(self, symbol: str) -> pd.Series:
         """获取指定标的的成交量序列"""
         bars = self._bar_history.get(symbol, [])

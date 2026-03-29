@@ -1,8 +1,8 @@
 # OpenQuant 默认配置
 backtest:
   initial_capital: 100000
-  commission_rate: 0.0003
-  slippage_rate: 0.001
+  commission_rate: 0.0002
+  slippage_rate: 0.005
 
 simulation:
   poll_interval: 60

@@ -71,3 +71,70 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
         (low - prev_close).abs(),
     ], axis=1).max(axis=1)
     return true_range.rolling(window=period, min_periods=1).mean()
+
+
+def kdj(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    fastk_period: int = 9,
+    slowk_period: int = 3,
+    slowd_period: int = 3,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """KDJ 随机指标
+
+    Args:
+        high: 最高价序列
+        low: 最低价序列
+        close: 收盘价序列
+        fastk_period: RSV 周期
+        slowk_period: K 值平滑周期
+        slowd_period: D 值平滑周期
+
+    Returns:
+        (K, D, J)
+    """
+    lowest_low = low.rolling(window=fastk_period, min_periods=1).min()
+    highest_high = high.rolling(window=fastk_period, min_periods=1).max()
+    denominator = highest_high - lowest_low
+    rsv = pd.Series(
+        np.where(denominator == 0, 50.0, (close - lowest_low) / denominator * 100),
+        index=close.index,
+    )
+    k_value = rsv.ewm(alpha=1.0 / slowk_period, adjust=False).mean()
+    d_value = k_value.ewm(alpha=1.0 / slowd_period, adjust=False).mean()
+    j_value = 3 * k_value - 2 * d_value
+    return k_value, d_value, j_value
+
+
+def donchian_channel(
+    high: pd.Series,
+    low: pd.Series,
+    period: int = 20,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """唐奇安通道 (Donchian Channel)
+
+    Args:
+        high: 最高价序列
+        low: 最低价序列
+        period: 回看周期
+
+    Returns:
+        (upper, middle, lower)
+    """
+    upper = high.rolling(window=period, min_periods=1).max()
+    lower = low.rolling(window=period, min_periods=1).min()
+    middle = (upper + lower) / 2
+    return upper, middle, lower
+
+
+def rate_of_change(series: pd.Series, period: int = 12) -> pd.Series:
+    """变动率指标 (ROC)
+
+    衡量价格在 period 周期内的变化百分比。
+    """
+    shifted = series.shift(period)
+    return pd.Series(
+        np.where(shifted == 0, 0.0, (series - shifted) / shifted * 100),
+        index=series.index,
+    )
