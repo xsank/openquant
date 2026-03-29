@@ -1,0 +1,280 @@
+"""回测引擎
+
+基于历史数据驱动策略执行，模拟交易过程并记录绩效。
+"""
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime
+
+import pandas as pd
+
+from openquant.core.exceptions import InsufficientFundsError, InsufficientPositionError
+from openquant.core.interfaces import EngineInterface, StrategyInterface
+from openquant.core.models import (
+    Bar,
+    FrequencyType,
+    MarketType,
+    Order,
+    OrderSide,
+    OrderStatus,
+    Portfolio,
+    Position,
+    TradeRecord,
+)
+from openquant.storage.sqlite_storage import SqliteStorage
+from openquant.utils.metrics import calculate_metrics
+
+logger = logging.getLogger(__name__)
+
+
+class BacktestEngine(EngineInterface):
+    """历史回测引擎"""
+
+    def __init__(
+        self,
+        initial_capital: float = 100000.0,
+        commission_rate: float = 0.0003,
+        slippage_rate: float = 0.001,
+        storage: SqliteStorage | None = None,
+    ):
+        self.initial_capital = initial_capital
+        self.commission_rate = commission_rate
+        self.slippage_rate = slippage_rate
+        self.storage = storage
+
+        self._strategy: StrategyInterface | None = None
+        self._portfolio: Portfolio | None = None
+        self._equity_curve: list[tuple[datetime, float]] = []
+        self._data_feeds: list[tuple[str, pd.DataFrame, MarketType]] = []
+
+    def set_strategy(self, strategy: StrategyInterface) -> None:
+        self._strategy = strategy
+
+    def add_data(
+        self,
+        symbol: str,
+        data: pd.DataFrame,
+        market: MarketType = MarketType.A_SHARE,
+    ) -> None:
+        """添加回测数据
+
+        Args:
+            symbol: 标的代码
+            data: K线数据 DataFrame，需包含 datetime, open, high, low, close, volume 列
+            market: 市场类型
+        """
+        required_columns = {"datetime", "open", "high", "low", "close", "volume"}
+        missing = required_columns - set(data.columns)
+        if missing:
+            raise ValueError(f"数据缺少必要列: {missing}")
+        self._data_feeds.append((symbol, data.sort_values("datetime").reset_index(drop=True), market))
+
+    def run(self) -> Portfolio:
+        if self._strategy is None:
+            raise ValueError("未设置策略，请先调用 set_strategy()")
+        if not self._data_feeds:
+            raise ValueError("未添加数据，请先调用 add_data()")
+
+        self._portfolio = Portfolio(
+            initial_capital=self.initial_capital,
+            cash=self.initial_capital,
+        )
+        self._equity_curve.clear()
+        self._strategy.initialize(self._portfolio)
+
+        # 合并所有数据并按时间排序
+        all_bars = self._build_bar_sequence()
+
+        logger.info(
+            "开始回测: 策略=%s, 初始资金=%.2f, 数据条数=%d",
+            self._strategy.get_name(), self.initial_capital, len(all_bars),
+        )
+
+        for bar in all_bars:
+            # 更新持仓市价
+            self._update_position_price(bar)
+
+            # 策略生成订单
+            orders = self._strategy.on_bar(bar, self._portfolio)
+
+            # 执行订单
+            for order in orders:
+                self._execute_order(order, bar)
+
+            # 记录权益曲线
+            self._equity_curve.append((bar.datetime, self._portfolio.total_equity))
+
+        self._strategy.on_finish(self._portfolio)
+
+        # 保存结果到数据库
+        if self.storage and self._portfolio.trade_history:
+            self.storage.save_trade_records(self._portfolio.trade_history)
+
+        logger.info(
+            "回测完成: 最终权益=%.2f, 总收益率=%.2f%%",
+            self._portfolio.total_equity,
+            self._portfolio.total_return * 100,
+        )
+        return self._portfolio
+
+    def get_results(self) -> dict:
+        if not self._equity_curve:
+            return {}
+
+        dates = [item[0] for item in self._equity_curve]
+        values = [item[1] for item in self._equity_curve]
+        equity_series = pd.Series(values, index=pd.DatetimeIndex(dates))
+
+        metrics = calculate_metrics(equity_series)
+        metrics["strategy_name"] = self._strategy.get_name() if self._strategy else ""
+        metrics["initial_capital"] = self.initial_capital
+        metrics["final_equity"] = values[-1] if values else 0
+        metrics["total_trades"] = len(self._portfolio.trade_history) if self._portfolio else 0
+        metrics["total_commission"] = self._portfolio.total_commission if self._portfolio else 0
+        return metrics
+
+    def get_equity_curve(self) -> pd.DataFrame:
+        """获取权益曲线 DataFrame"""
+        if not self._equity_curve:
+            return pd.DataFrame()
+        dates = [item[0] for item in self._equity_curve]
+        values = [item[1] for item in self._equity_curve]
+        return pd.DataFrame({"datetime": dates, "equity": values})
+
+    def _build_bar_sequence(self) -> list[Bar]:
+        """将所有数据源合并为按时间排序的 Bar 序列"""
+        all_bars: list[Bar] = []
+        for symbol, df, market in self._data_feeds:
+            for _, row in df.iterrows():
+                bar = Bar(
+                    symbol=symbol,
+                    datetime=pd.Timestamp(row["datetime"]).to_pydatetime(),
+                    open=float(row["open"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]),
+                    volume=float(row["volume"]),
+                    amount=float(row.get("amount", 0)),
+                    market=market,
+                )
+                all_bars.append(bar)
+        all_bars.sort(key=lambda b: b.datetime)
+        return all_bars
+
+    def _update_position_price(self, bar: Bar) -> None:
+        """更新持仓的当前价格"""
+        if bar.symbol in self._portfolio.positions:
+            self._portfolio.positions[bar.symbol].current_price = bar.close
+
+    def _execute_order(self, order: Order, bar: Bar) -> None:
+        """执行订单（模拟撮合）"""
+        try:
+            if order.side == OrderSide.BUY:
+                self._execute_buy(order, bar)
+            else:
+                self._execute_sell(order, bar)
+        except (InsufficientFundsError, InsufficientPositionError) as exc:
+            order.status = OrderStatus.REJECTED
+            logger.warning("订单被拒绝: %s - %s", order.order_id, exc)
+
+    def _execute_buy(self, order: Order, bar: Bar) -> None:
+        """执行买入"""
+        # 考虑滑点
+        fill_price = order.price * (1 + self.slippage_rate)
+        total_cost = fill_price * order.quantity
+        commission = total_cost * self.commission_rate
+
+        if total_cost + commission > self._portfolio.cash:
+            raise InsufficientFundsError(
+                f"资金不足: 需要 {total_cost + commission:.2f}, 可用 {self._portfolio.cash:.2f}"
+            )
+
+        # 更新组合
+        self._portfolio.cash -= (total_cost + commission)
+
+        if order.symbol in self._portfolio.positions:
+            pos = self._portfolio.positions[order.symbol]
+            total_quantity = pos.quantity + order.quantity
+            pos.avg_cost = (pos.avg_cost * pos.quantity + fill_price * order.quantity) / total_quantity
+            pos.quantity = total_quantity
+        else:
+            self._portfolio.positions[order.symbol] = Position(
+                symbol=order.symbol,
+                quantity=order.quantity,
+                avg_cost=fill_price,
+                current_price=bar.close,
+                market=order.market,
+            )
+
+        # 更新订单状态
+        order.status = OrderStatus.FILLED
+        order.filled_price = fill_price
+        order.filled_quantity = order.quantity
+        order.filled_at = bar.datetime
+        order.commission = commission
+
+        # 记录成交
+        trade = TradeRecord(
+            trade_id=str(uuid.uuid4())[:8],
+            order_id=order.order_id,
+            symbol=order.symbol,
+            side=OrderSide.BUY,
+            price=fill_price,
+            quantity=order.quantity,
+            commission=commission,
+            traded_at=bar.datetime,
+            market=order.market,
+        )
+        self._portfolio.trade_history.append(trade)
+        self._strategy.on_order_filled(order, self._portfolio)
+
+        logger.debug("买入成交: %s %d股 @ %.2f, 佣金=%.2f", order.symbol, order.quantity, fill_price, commission)
+
+    def _execute_sell(self, order: Order, bar: Bar) -> None:
+        """执行卖出"""
+        if order.symbol not in self._portfolio.positions:
+            raise InsufficientPositionError(f"无持仓: {order.symbol}")
+
+        pos = self._portfolio.positions[order.symbol]
+        if pos.quantity < order.quantity:
+            raise InsufficientPositionError(
+                f"持仓不足: 持有 {pos.quantity}, 卖出 {order.quantity}"
+            )
+
+        # 考虑滑点
+        fill_price = order.price * (1 - self.slippage_rate)
+        total_revenue = fill_price * order.quantity
+        commission = total_revenue * self.commission_rate
+
+        # 更新组合
+        self._portfolio.cash += (total_revenue - commission)
+        pos.quantity -= order.quantity
+
+        if pos.quantity == 0:
+            del self._portfolio.positions[order.symbol]
+
+        # 更新订单状态
+        order.status = OrderStatus.FILLED
+        order.filled_price = fill_price
+        order.filled_quantity = order.quantity
+        order.filled_at = bar.datetime
+        order.commission = commission
+
+        # 记录成交
+        trade = TradeRecord(
+            trade_id=str(uuid.uuid4())[:8],
+            order_id=order.order_id,
+            symbol=order.symbol,
+            side=OrderSide.SELL,
+            price=fill_price,
+            quantity=order.quantity,
+            commission=commission,
+            traded_at=bar.datetime,
+            market=order.market,
+        )
+        self._portfolio.trade_history.append(trade)
+        self._strategy.on_order_filled(order, self._portfolio)
+
+        logger.debug("卖出成交: %s %d股 @ %.2f, 佣金=%.2f", order.symbol, order.quantity, fill_price, commission)

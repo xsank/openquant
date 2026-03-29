@@ -1,0 +1,17 @@
+# OpenQuant 默认配置
+backtest:
+  initial_capital: 100000
+  commission_rate: 0.0003
+  slippage_rate: 0.001
+
+simulation:
+  poll_interval: 60
+  initial_capital: 100000
+
+storage:
+  type: sqlite
+  db_path: data/openquant.db
+
+datasource:
+  default: baostock
+  realtime: akshare
