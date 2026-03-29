@@ -102,6 +102,7 @@ def run_simulation(args: argparse.Namespace) -> None:
         commission_rate=args.commission,
         slippage_rate=args.slippage,
         poll_interval=args.interval,
+        max_rounds=args.max_rounds,
         storage=storage,
     )
     engine.set_strategy(strategy)
@@ -171,6 +172,7 @@ def main() -> None:
     sim_parser.add_argument("--commission", type=float, default=0.0003, help="佣金费率")
     sim_parser.add_argument("--slippage", type=float, default=0.001, help="滑点费率")
     sim_parser.add_argument("--interval", type=int, default=60, help="轮询间隔(秒)")
+    sim_parser.add_argument("--max-rounds", type=int, default=0, help="最大轮询次数，0表示无限循环")
     sim_parser.add_argument("--db-path", default="data/openquant.db", help="数据库路径")
 
     args = parser.parse_args()

@@ -45,6 +45,7 @@ class SimulationEngine(EngineInterface):
         commission_rate: float = 0.0003,
         slippage_rate: float = 0.001,
         poll_interval: int = 60,
+        max_rounds: int = 0,
         storage: SqliteStorage | None = None,
     ):
         """
@@ -54,6 +55,7 @@ class SimulationEngine(EngineInterface):
             commission_rate: 佣金费率
             slippage_rate: 滑点费率
             poll_interval: 行情轮询间隔（秒）
+            max_rounds: 最大轮询次数，0 表示无限循环直到手动停止
             storage: 存储实例（可选）
         """
         self.data_source = data_source
@@ -61,6 +63,7 @@ class SimulationEngine(EngineInterface):
         self.commission_rate = commission_rate
         self.slippage_rate = slippage_rate
         self.poll_interval = poll_interval
+        self.max_rounds = max_rounds
         self.storage = storage
 
         self._strategy: StrategyInterface | None = None
@@ -99,8 +102,13 @@ class SimulationEngine(EngineInterface):
         )
 
         try:
+            round_count = 0
             while self._running:
                 self._poll_and_execute()
+                round_count += 1
+                if self.max_rounds > 0 and round_count >= self.max_rounds:
+                    logger.info("已达到最大轮询次数 %d，自动停止", self.max_rounds)
+                    break
                 time.sleep(self.poll_interval)
         except KeyboardInterrupt:
             logger.info("收到中断信号，停止模拟交易")
