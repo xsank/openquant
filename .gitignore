@@ -214,3 +214,6 @@ __marimo__/
 
 # Runtime files
 output/
+
+# Private files
+script/private/
