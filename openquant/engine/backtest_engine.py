@@ -27,7 +27,7 @@ from openquant.core.models import (
 from openquant.risk.risk_manager import RiskManager
 from openquant.risk.stop_loss import StopLossConfig, StopLossManager
 from openquant.storage.sqlite_storage import SqliteStorage
-from openquant.utils.metrics import calculate_metrics
+from openquant.utils.metrics import calculate_benchmark_metrics, calculate_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,8 @@ class BacktestEngine(EngineInterface):
         self._data_feeds: list[tuple[str, pd.DataFrame, MarketType]] = []
         self._stop_loss_manager = StopLossManager(stop_loss_config)
         self._risk_manager = risk_manager
+        self._benchmark_data: pd.DataFrame | None = None
+        self._benchmark_symbol: str | None = None
 
     def set_strategy(self, strategy: StrategyInterface) -> None:
         self._strategy = strategy
@@ -77,6 +79,18 @@ class BacktestEngine(EngineInterface):
         if missing:
             raise ValueError(f"数据缺少必要列: {missing}")
         self._data_feeds.append((symbol, data.sort_values("datetime").reset_index(drop=True), market))
+
+    def set_benchmark(self, symbol: str, data: pd.DataFrame) -> None:
+        """设置基准数据用于对比分析
+
+        Args:
+            symbol: 基准标的代码（如沪深300指数 000300）
+            data: 基准K线数据 DataFrame，需包含 datetime, close 列
+        """
+        if "datetime" not in data.columns or "close" not in data.columns:
+            raise ValueError("基准数据需包含 datetime 和 close 列")
+        self._benchmark_symbol = symbol
+        self._benchmark_data = data.sort_values("datetime").reset_index(drop=True)
 
     def run(self) -> Portfolio:
         if self._strategy is None:
@@ -160,7 +174,82 @@ class BacktestEngine(EngineInterface):
         metrics["final_equity"] = values[-1] if values else 0
         metrics["total_trades"] = len(self._portfolio.trade_history) if self._portfolio else 0
         metrics["total_commission"] = self._portfolio.total_commission if self._portfolio else 0
+
+        # 基准对比指标
+        if self._benchmark_data is not None:
+            benchmark_equity = self._build_benchmark_equity(equity_series)
+            if benchmark_equity is not None and not benchmark_equity.empty:
+                benchmark_metrics = calculate_benchmark_metrics(
+                    equity_series, benchmark_equity,
+                )
+                metrics.update(benchmark_metrics)
+                metrics["benchmark_symbol"] = self._benchmark_symbol or ""
+
         return metrics
+
+    def get_benchmark_equity_curve(self) -> pd.DataFrame:
+        """获取基准权益曲线（归一化到与策略相同的初始资金）"""
+        if self._benchmark_data is None or not self._equity_curve:
+            return pd.DataFrame()
+
+        dates = [item[0] for item in self._equity_curve]
+        values = [item[1] for item in self._equity_curve]
+        equity_series = pd.Series(values, index=pd.DatetimeIndex(dates))
+
+        benchmark_equity = self._build_benchmark_equity(equity_series)
+        if benchmark_equity is None or benchmark_equity.empty:
+            return pd.DataFrame()
+
+        return pd.DataFrame({
+            "datetime": benchmark_equity.index,
+            "equity": benchmark_equity.values,
+        })
+
+    def _build_benchmark_equity(self, strategy_equity: pd.Series) -> pd.Series | None:
+        """根据基准数据构建与策略对齐的基准权益曲线
+
+        将基准收盘价归一化到与策略相同的初始资金水平。
+        """
+        if self._benchmark_data is None:
+            return None
+
+        benchmark_df = self._benchmark_data.copy()
+        benchmark_df["datetime"] = pd.to_datetime(benchmark_df["datetime"])
+        benchmark_series = pd.Series(
+            benchmark_df["close"].values,
+            index=pd.DatetimeIndex(benchmark_df["datetime"]),
+        )
+
+        # 对齐到策略的日期范围
+        common_index = strategy_equity.index.intersection(benchmark_series.index)
+        if len(common_index) < 2:
+            # 尝试按日期（忽略时间）对齐
+            strategy_dates = strategy_equity.index.normalize()
+            benchmark_dates = benchmark_series.index.normalize()
+
+            strategy_equity_daily = strategy_equity.copy()
+            strategy_equity_daily.index = strategy_dates
+            strategy_equity_daily = strategy_equity_daily[~strategy_equity_daily.index.duplicated(keep="last")]
+
+            benchmark_series_daily = benchmark_series.copy()
+            benchmark_series_daily.index = benchmark_dates
+            benchmark_series_daily = benchmark_series_daily[~benchmark_series_daily.index.duplicated(keep="last")]
+
+            common_index = strategy_equity_daily.index.intersection(benchmark_series_daily.index)
+            if len(common_index) < 2:
+                return None
+
+            benchmark_aligned = benchmark_series_daily.loc[common_index]
+        else:
+            benchmark_aligned = benchmark_series.loc[common_index]
+
+        # 归一化：基准初始值 = 策略初始资金
+        initial_benchmark_price = benchmark_aligned.iloc[0]
+        if initial_benchmark_price == 0:
+            return None
+
+        normalized_benchmark = benchmark_aligned / initial_benchmark_price * self.initial_capital
+        return normalized_benchmark
 
     def get_equity_curve(self) -> pd.DataFrame:
         """获取权益曲线 DataFrame"""

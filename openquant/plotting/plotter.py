@@ -14,6 +14,8 @@ import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 
+from openquant.utils.metrics import calculate_rolling_alpha_beta
+
 logger = logging.getLogger(__name__)
 
 # 配置中文字体支持
@@ -760,3 +762,229 @@ def generate_multi_strategy_report(
         len(generated_files), output_dir,
     )
     return generated_files
+
+
+def plot_benchmark_comparison(
+    strategy_equity_df: pd.DataFrame,
+    benchmark_equity_df: pd.DataFrame,
+    strategy_name: str = "Strategy",
+    benchmark_name: str = "Benchmark",
+    title: str = "Strategy vs Benchmark Comparison",
+    save_path: str | None = None,
+) -> None:
+    """绘制策略与基准的权益曲线对比图
+
+    在同一张图上绘制策略权益曲线和基准权益曲线，并在下方显示超额收益。
+
+    Args:
+        strategy_equity_df: 策略权益数据，包含 datetime 和 equity 列
+        benchmark_equity_df: 基准权益数据，包含 datetime 和 equity 列
+        strategy_name: 策略名称
+        benchmark_name: 基准名称
+        title: 图表标题
+        save_path: 保存路径，为 None 则不保存
+    """
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={"height_ratios": [3, 1]})
+
+    # 归一化权益曲线
+    strategy_equity = strategy_equity_df["equity"] / strategy_equity_df["equity"].iloc[0] * 100
+    benchmark_equity = benchmark_equity_df["equity"] / benchmark_equity_df["equity"].iloc[0] * 100
+
+    # 绘制权益曲线
+    ax1.plot(
+        strategy_equity_df["datetime"],
+        strategy_equity,
+        linewidth=1.5,
+        color="#2196F3",
+        label=strategy_name,
+    )
+    ax1.plot(
+        benchmark_equity_df["datetime"],
+        benchmark_equity,
+        linewidth=1.5,
+        color="#9E9E9E",
+        linestyle="--",
+        label=benchmark_name,
+    )
+
+    ax1.set_title(title, fontsize=14, fontweight="bold")
+    ax1.set_ylabel("Normalized Equity", fontsize=11)
+    ax1.legend(loc="best", fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+
+    # 计算超额收益
+    excess_return = strategy_equity - benchmark_equity
+
+    # 绘制超额收益
+    ax2.plot(
+        strategy_equity_df["datetime"],
+        excess_return,
+        linewidth=1.5,
+        color="#2196F3",
+    )
+    ax2.fill_between(
+        strategy_equity_df["datetime"],
+        excess_return,
+        0,
+        alpha=0.15,
+        color="#2196F3",
+    )
+    ax2.axhline(y=0, color="black", linestyle="-", linewidth=0.8, alpha=0.5)
+    ax2.set_xlabel("Date", fontsize=11)
+    ax2.set_ylabel("Excess Return (%)", fontsize=11)
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+
+    fig.tight_layout()
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        logger.info("基准对比图已保存: %s", save_path)
+    plt.close(fig)
+
+
+def plot_rolling_alpha_beta(
+    strategy_equity_df: pd.DataFrame,
+    benchmark_equity_df: pd.DataFrame,
+    window: int = 252,
+    title: str = "Rolling Alpha & Beta",
+    save_path: str | None = None,
+) -> None:
+    """绘制滚动 Alpha 和 Beta 图
+
+    Args:
+        strategy_equity_df: 策略权益数据，包含 datetime 和 equity 列
+        benchmark_equity_df: 基准权益数据，包含 datetime 和 equity 列
+        window: 滚动窗口大小
+        title: 图表标题
+        save_path: 保存路径，为 None 则不保存
+    """
+    # 将 DataFrame 转换为 pd.Series
+    strategy_series = pd.Series(
+        strategy_equity_df["equity"].values,
+        index=pd.DatetimeIndex(strategy_equity_df["datetime"]),
+    )
+    benchmark_series = pd.Series(
+        benchmark_equity_df["equity"].values,
+        index=pd.DatetimeIndex(benchmark_equity_df["datetime"]),
+    )
+
+    # 计算滚动 Alpha 和 Beta
+    rolling_metrics = calculate_rolling_alpha_beta(
+        strategy_series, benchmark_series, window=window, risk_free_rate=0.0
+    )
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8))
+
+    # 绘制滚动 Alpha
+    ax1.plot(
+        rolling_metrics.index,
+        rolling_metrics["alpha"],
+        linewidth=1.5,
+        color="#4CAF50",
+        label="Rolling Alpha",
+    )
+    ax1.axhline(y=0, color="black", linestyle="-", linewidth=0.8, alpha=0.5)
+    ax1.set_title(title, fontsize=14, fontweight="bold")
+    ax1.set_ylabel("Alpha", fontsize=11)
+    ax1.legend(loc="best", fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+
+    # 绘制滚动 Beta
+    ax2.plot(
+        rolling_metrics.index,
+        rolling_metrics["beta"],
+        linewidth=1.5,
+        color="#FF9800",
+        label="Rolling Beta",
+    )
+    ax2.axhline(y=1.0, color="black", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax2.set_xlabel("Date", fontsize=11)
+    ax2.set_ylabel("Beta", fontsize=11)
+    ax2.legend(loc="best", fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax2.xaxis.set_major_locator(mdates.AutoDateLocator())
+
+    fig.tight_layout()
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        logger.info("滚动 Alpha Beta 图已保存: %s", save_path)
+    plt.close(fig)
+
+
+def plot_benchmark_summary_table(
+    results: dict[str, dict],
+    title: str = "Benchmark Comparison Summary",
+    save_path: str | None = None,
+) -> None:
+    """绘制基准对比指标汇总表格
+
+    Args:
+        results: {策略名称: metrics_dict} 字典，metrics_dict 包含基准对比相关指标
+        title: 图表标题
+        save_path: 保存路径，为 None 则不保存
+    """
+    columns = [
+        "Alpha(%)",
+        "Beta",
+        "Tracking Error(%)",
+        "Info Ratio",
+        "Excess Return(%)",
+        "Benchmark Return(%)",
+    ]
+    table_data = []
+    for name, metrics in results.items():
+        row = [
+            f"{metrics.get('alpha', 0):.2f}",
+            f"{metrics.get('beta', 0):.2f}",
+            f"{metrics.get('tracking_error', 0):.2f}",
+            f"{metrics.get('information_ratio', 0):.2f}",
+            f"{metrics.get('excess_return', 0):.2f}",
+            f"{metrics.get('benchmark_total_return', 0):.2f}",
+        ]
+        table_data.append(row)
+
+    row_labels = list(results.keys())
+    row_count = len(row_labels)
+    fig_height = max(4, 1.5 + row_count * 0.45)
+    fig, ax = plt.subplots(figsize=(18, fig_height))
+    ax.axis("off")
+
+    table = ax.table(
+        cellText=table_data,
+        rowLabels=row_labels,
+        colLabels=columns,
+        cellLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.6)
+
+    for (row, col), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_facecolor("#37474F")
+            cell.set_text_props(color="white", fontweight="bold")
+        elif col == -1:
+            cell.set_facecolor("#ECEFF1")
+            cell.set_text_props(fontweight="bold")
+        else:
+            cell.set_facecolor("#FAFAFA" if row % 2 == 0 else "white")
+
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
+    fig.tight_layout()
+
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        logger.info("基准对比汇总表格已保存: %s", save_path)
+    plt.close(fig)

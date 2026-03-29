@@ -17,31 +17,33 @@ pip install -r requirements.txt
 
 ### 2.1 Backtest
 ```python
-python -m openquant.main backtest \
+python -m openquant.main optimize \
   --symbol 09988 --start-date 2025-01-01 --end-date 2026-01-01 \
-  --market hk_stock \
-  --strategy ma_cross --capital 100000
+  --strategy ma_cross \
+  --params short_window:int:3:20:1 long_window:int:10:60:5 \
+  --target-metric sharpe_ratio --search-method grid --top-n 10 \
+  --market hk_stock 
 ```
 
 the result is as follows:
 ```text
 ============================================================
-  策略: MA_Cross(5,20)
+  策略: MA_Cross(14,15)
 ============================================================
   初始资金:           100,000.00
-  最终权益:           113,729.62
-  总收益率:               13.73%
-  年化收益率:             14.09%
-  年化波动率:             26.96%
-  夏普比率:               0.4113
-  索提诺比率:             0.5832
-  卡玛比率:               0.6894
-  最大回撤:              -20.43%
-  最大回撤天数:               84
-  胜率:                   16.33%
-  盈亏比:                 1.4003
-  交易次数:                   10
-  总佣金:                 263.16
+  最终权益:           146,862.18
+  总收益率:               46.86%
+  年化收益率:             48.25%
+  年化波动率:             24.31%
+  夏普比率:               1.8614
+  索提诺比率:             2.3994
+  卡玛比率:               5.2590
+  最大回撤:               -9.17%
+  最大回撤天数:               32
+  胜率:                   15.10%
+  盈亏比:                 2.1788
+  交易次数:                   34
+  总佣金:               1,077.18
 ============================================================
 ```
 
