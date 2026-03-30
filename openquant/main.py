@@ -42,7 +42,8 @@ _STRATEGY_REGISTRY = {
     "kdj": KDJStrategy,
     "dual_momentum": DualMomentumStrategy,
     "volume_breakout": VolumeBreakoutStrategy,
-    "event_ma_cross": EventEnhancedMACrossStrategy,
+        "event_ma_cross": EventEnhancedMACrossStrategy,
+    # 情绪增强策略（集成新闻+事件情绪权重因子）
 }
 
 _MARKET_MAP = {
@@ -553,6 +554,8 @@ def main() -> None:
     backtest_parser.add_argument("--benchmark", default=None, help="基准标的代码 (如 sh.000300 沪深300)")
     backtest_parser.add_argument("--output-dir", default="output/charts", help="图表输出目录")
     backtest_parser.add_argument("--with-events", action="store_true", help="启用事件因子（财报、分红、大宗交易等）")
+    backtest_parser.add_argument("--with-sentiment", action="store_true", help="启用情绪分析增强（通过 SentimentStrategyWrapper 包装原策略）")
+    backtest_parser.add_argument("--sentiment-mode", default="default", choices=["default", "conservative", "aggressive", "disabled"], help="情绪分析模式: default/conservative/aggressive/disabled")
 
     # 模拟交易命令
     sim_parser = subparsers.add_parser("simulate", help="模拟交易")
