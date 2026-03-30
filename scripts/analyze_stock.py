@@ -17,6 +17,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from pathlib import Path
 from datetime import datetime, timedelta
 
 from openquant.core.models import MarketType
@@ -33,6 +38,7 @@ from openquant.strategy.rsi_strategy import RSIReversalStrategy
 from openquant.strategy.turtle_strategy import TurtleStrategy
 from openquant.strategy.volume_breakout_strategy import VolumeBreakoutStrategy
 from openquant.utils.indicators import bollinger_bands
+from openquant.utils.md_to_pdf import convert_md_to_pdf
 
 STRATEGY_REGISTRY = {
     "ma_cross": MACrossStrategy,
@@ -668,6 +674,445 @@ def print_trading_advice(
     print("=" * 70)
 
 
+def generate_charts(
+    df: pd.DataFrame,
+    symbol: str,
+    charts_dir: str,
+    all_results: dict,
+    bollinger_window: int = 20,
+    bollinger_std: float = 2.0,
+):
+    """生成所有技术分析图表并保存到指定目录"""
+    Path(charts_dir).mkdir(parents=True, exist_ok=True)
+    dates = pd.to_datetime(df["datetime"])
+    close = df["close"].values
+
+    # 1. 价格走势 + 布林带图
+    upper, middle, lower = bollinger_bands(df["close"], bollinger_window, bollinger_std)
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(dates, close, linewidth=1.2, color="#1976D2", label="Close")
+    ax.plot(dates, upper, linewidth=0.8, color="#E53935", linestyle="--", label="Upper Band")
+    ax.plot(dates, middle, linewidth=0.8, color="#FF9800", linestyle="-.", label="Middle Band")
+    ax.plot(dates, lower, linewidth=0.8, color="#43A047", linestyle="--", label="Lower Band")
+    ax.fill_between(dates, upper, lower, alpha=0.08, color="#90CAF9")
+    ax.set_title(f"{symbol} Price & Bollinger Bands", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Price", fontsize=11)
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right")
+    fig.tight_layout()
+    fig.savefig(f"{charts_dir}/price_bollinger.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 2. RSI 指标图
+    rsi14 = calculate_rsi(df["close"], 14)
+    rsi6 = calculate_rsi(df["close"], 6)
+    fig, ax = plt.subplots(figsize=(14, 4))
+    ax.plot(dates, rsi14, linewidth=1.2, color="#1976D2", label="RSI(14)")
+    ax.plot(dates, rsi6, linewidth=0.8, color="#FF9800", alpha=0.7, label="RSI(6)")
+    ax.axhline(y=70, color="#E53935", linestyle="--", linewidth=0.8, label="Overbought (70)")
+    ax.axhline(y=30, color="#43A047", linestyle="--", linewidth=0.8, label="Oversold (30)")
+    ax.axhline(y=50, color="gray", linestyle=":", linewidth=0.5)
+    ax.fill_between(dates, rsi14, 70, where=(rsi14 >= 70), alpha=0.15, color="#E53935")
+    ax.fill_between(dates, rsi14, 30, where=(rsi14 <= 30), alpha=0.15, color="#43A047")
+    ax.set_title(f"{symbol} RSI Analysis", fontsize=14, fontweight="bold")
+    ax.set_ylabel("RSI", fontsize=11)
+    ax.set_ylim(0, 100)
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right")
+    fig.tight_layout()
+    fig.savefig(f"{charts_dir}/rsi_analysis.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 3. MACD 图
+    macd_line, signal_line, histogram = calculate_macd(df["close"])
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={"height_ratios": [2, 1]})
+    ax1.plot(dates, close, linewidth=1.2, color="#1976D2", label="Close")
+    ax1.set_title(f"{symbol} MACD Analysis", fontsize=14, fontweight="bold")
+    ax1.set_ylabel("Price", fontsize=11)
+    ax1.legend(loc="upper left", fontsize=9)
+    ax1.grid(True, alpha=0.3)
+    colors_hist = ["#43A047" if v >= 0 else "#E53935" for v in histogram]
+    ax2.bar(dates, histogram, color=colors_hist, alpha=0.7, width=1.5)
+    ax2.plot(dates, macd_line, linewidth=1.0, color="#1976D2", label="MACD")
+    ax2.plot(dates, signal_line, linewidth=1.0, color="#FF9800", label="Signal")
+    ax2.axhline(y=0, color="black", linewidth=0.5)
+    ax2.set_ylabel("MACD", fontsize=11)
+    ax2.legend(loc="upper left", fontsize=9)
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax2.xaxis.set_major_locator(mdates.MonthLocator())
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=30, ha="right")
+    fig.tight_layout()
+    fig.savefig(f"{charts_dir}/macd_analysis.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 4. 均线系统图
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(dates, close, linewidth=1.2, color="#1976D2", label="Close")
+    ma_colors = {"MA5": "#FF9800", "MA10": "#9C27B0", "MA20": "#E53935", "MA60": "#43A047"}
+    for period, color in zip([5, 10, 20, 60], ma_colors.values()):
+        if len(df) >= period:
+            ma = df["close"].rolling(period).mean()
+            ax.plot(dates, ma, linewidth=0.8, color=color, alpha=0.8, label=f"MA{period}")
+    ax.set_title(f"{symbol} Moving Average System", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Price", fontsize=11)
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right")
+    fig.tight_layout()
+    fig.savefig(f"{charts_dir}/ma_system.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 5. 支撑阻力位图
+    support_levels, resistance_levels = calculate_support_resistance(df)
+    current_price = df["close"].iloc[-1]
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(dates, close, linewidth=1.2, color="#1976D2", label="Close")
+    for name, level in resistance_levels:
+        ax.axhline(y=level, color="#E53935", linestyle="--", linewidth=0.7, alpha=0.6)
+        ax.text(dates.iloc[-1], level, f" {name}: {level}", fontsize=8, color="#E53935", va="bottom")
+    for name, level in support_levels:
+        ax.axhline(y=level, color="#43A047", linestyle="--", linewidth=0.7, alpha=0.6)
+        ax.text(dates.iloc[-1], level, f" {name}: {level}", fontsize=8, color="#43A047", va="top")
+    ax.axhline(y=current_price, color="#FF9800", linewidth=1.0, label=f"Current: {current_price:.2f}")
+    ax.set_title(f"{symbol} Support & Resistance", fontsize=14, fontweight="bold")
+    ax.set_ylabel("Price", fontsize=11)
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right")
+    fig.tight_layout()
+    fig.savefig(f"{charts_dir}/support_resistance.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # 6. 策略排名柱状图
+    sorted_results = sorted(
+        all_results.items(),
+        key=lambda x: x[1]["metrics"].get("sharpe_ratio", float("-inf")),
+        reverse=True,
+    )
+    names = [r[1]["name"] for r in sorted_results]
+    returns = [r[1]["metrics"].get("total_return", 0) for r in sorted_results]
+    sharpes = [r[1]["metrics"].get("sharpe_ratio", 0) for r in sorted_results]
+    x = np.arange(len(names))
+    width = 0.35
+    fig, ax1 = plt.subplots(figsize=(14, 6))
+    colors_bar = ["#43A047" if r >= 0 else "#E53935" for r in returns]
+    bars = ax1.bar(x - width / 2, returns, width, color=colors_bar, alpha=0.85, label="Return (%)")
+    ax2 = ax1.twinx()
+    ax2.bar(x + width / 2, sharpes, width, color="#1976D2", alpha=0.7, label="Sharpe Ratio")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(names, rotation=30, ha="right", fontsize=8)
+    ax1.set_ylabel("Return (%)", fontsize=11)
+    ax2.set_ylabel("Sharpe Ratio", fontsize=11)
+    ax1.set_title(f"{symbol} Strategy Ranking", fontsize=14, fontweight="bold")
+    ax1.legend(loc="upper left", fontsize=9)
+    ax2.legend(loc="upper right", fontsize=9)
+    ax1.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(f"{charts_dir}/strategy_ranking.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"\n📊 图表已保存到: {charts_dir}/")
+
+
+def generate_markdown_report(
+    symbol: str,
+    market_key: str,
+    timestamp: str,
+    md_dir: str,
+    charts_dir: str,
+    df: pd.DataFrame,
+    all_results: dict,
+    best_strategy_name: str,
+    best_params: dict,
+    best_metrics: dict,
+    bollinger_info: dict,
+    rsi_value: float,
+    macd_hist: float,
+    vol_info: dict,
+    bollinger_window: int,
+    bollinger_std: float,
+):
+    """生成 Markdown 格式的综合分析报告"""
+    Path(md_dir).mkdir(parents=True, exist_ok=True)
+    currency = CURRENCY_MAP.get(market_key, "")
+    current_price = df["close"].iloc[-1]
+    prev_close = df["close"].iloc[-2]
+    price_change = current_price - prev_close
+    price_change_pct = (price_change / prev_close) * 100
+    md_path = f"{md_dir}/analyze_{symbol}.md"
+
+    # 策略排名表格
+    sorted_results = sorted(
+        all_results.items(),
+        key=lambda x: x[1]["metrics"].get("sharpe_ratio", float("-inf")),
+        reverse=True,
+    )
+    ranking_rows = ""
+    for rank, (strategy_name, result) in enumerate(sorted_results, 1):
+        metrics = result["metrics"]
+        medal = "🏆" if rank == 1 else "🥈" if rank == 2 else "🥉" if rank == 3 else str(rank)
+        ranking_rows += (
+            f"| {medal} | {result['name']} | {metrics.get('total_return', 0):+.2f}% "
+            f"| {metrics.get('sharpe_ratio', 0):.4f} | {metrics.get('max_drawdown', 0):+.2f}% "
+            f"| {metrics.get('total_trades', 0)} |\n"
+        )
+
+    # 百分位
+    percentiles = calculate_percentile_rank(df)
+    percentile_rows = ""
+    for period, pct in percentiles.items():
+        percentile_rows += f"| {period} | {pct:.1f}% |\n"
+
+    # 均线
+    ma_rows = ""
+    for period in [5, 10, 20, 60]:
+        if len(df) >= period:
+            ma = df["close"].rolling(period).mean().iloc[-1]
+            diff_pct = (current_price / ma - 1) * 100
+            status = "多头" if current_price > ma else "空头"
+            ma_rows += f"| MA{period} | {ma:.2f} | {diff_pct:+.2f}% | {status} |\n"
+
+    # 支撑阻力位
+    support_levels, resistance_levels = calculate_support_resistance(df)
+    resistance_rows = ""
+    for name, level in resistance_levels:
+        diff = (level / current_price - 1) * 100
+        resistance_rows += f"| {name} | {level:.2f} | {diff:+.2f}% |\n"
+    support_rows = ""
+    for name, level in reversed(support_levels):
+        diff = (level / current_price - 1) * 100
+        support_rows += f"| {name} | {level:.2f} | {diff:+.2f}% |\n"
+
+    # MACD 趋势
+    macd_line_val, signal_line_val, histogram = calculate_macd(df["close"])
+    hist_val = histogram.iloc[-1]
+    prev_hist = histogram.iloc[-2]
+    if hist_val > 0 and hist_val > prev_hist:
+        macd_trend = "多头增强"
+    elif hist_val > 0:
+        macd_trend = "多头减弱"
+    elif hist_val < 0 and hist_val > prev_hist:
+        macd_trend = "空头减弱"
+    else:
+        macd_trend = "空头增强"
+
+    # RSI 状态
+    rsi_status = "超卖区" if rsi_value < 30 else "超买区" if rsi_value > 70 else "中性区"
+    rsi6_value = calculate_rsi(df["close"], 6).iloc[-1]
+
+    # 成功概率
+    success_prob = estimate_success_probability(df, bollinger_info, rsi_value, macd_hist)
+    if success_prob >= 70:
+        prob_label = "高概率买入机会"
+    elif success_prob >= 55:
+        prob_label = "中等概率，可小仓位试探"
+    elif success_prob >= 40:
+        prob_label = "概率偏低，建议观望"
+    else:
+        prob_label = "不建议买入"
+
+    # 交易建议
+    atr_value = vol_info["ATR(14)"]
+    ideal_buy = bollinger_info["下轨"]
+    stop_loss = round(ideal_buy - 1.5 * atr_value, 2)
+    take_profit = bollinger_info["上轨"]
+    params_str = ", ".join(f"{k}={v}" for k, v in best_params.items()) if best_params else "默认参数"
+
+    # 近期走势
+    recent_returns = ""
+    for days, label in [(5, "5日"), (20, "20日"), (60, "60日")]:
+        if len(df) > days + 1:
+            ret = (current_price / df["close"].iloc[-(days + 1)] - 1) * 100
+            recent_returns += f"| {label} | {ret:+.2f}% |\n"
+
+    md_content = f"""# {symbol} 综合量化分析报告
+
+**市场**: {market_key} | **货币**: {currency} | **分析时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+---
+
+## 全策略参数优化结果排名 (过去1年)
+
+| 排名 | 策略(最优参数) | 收益率 | 夏普比率 | 最大回撤 | 交易次数 |
+|------|---------------|--------|----------|----------|----------|
+{ranking_rows}
+
+### 冠军策略详情
+
+| 项目 | 值 |
+|------|-----|
+| 策略名称 | {sorted_results[0][1]['name']} |
+| 最优参数 | {', '.join(f'{k}={v}' for k, v in sorted_results[0][1].get('best_params', {}).items()) or '默认参数'} |
+| 收益率 | {sorted_results[0][1]['metrics'].get('total_return', 0):+.2f}% |
+| 夏普比率 | {sorted_results[0][1]['metrics'].get('sharpe_ratio', 0):.4f} |
+| 最大回撤 | {sorted_results[0][1]['metrics'].get('max_drawdown', 0):.2f}% |
+
+![策略排名](../../charts/{timestamp}/strategy_ranking.png)
+
+---
+
+## 当前行情
+
+| 指标 | 值 |
+|------|-----|
+| 最新收盘价 | {currency}{current_price:.2f} |
+| 涨跌 | {price_change:+.2f} ({price_change_pct:+.2f}%) |
+| 开盘 | {df['open'].iloc[-1]:.2f} |
+| 最高 | {df['high'].iloc[-1]:.2f} |
+| 最低 | {df['low'].iloc[-1]:.2f} |
+| 成交量 | {df['volume'].iloc[-1]:,.0f} |
+
+---
+
+## 历史价格百分位分析
+
+| 周期 | 百分位 |
+|------|--------|
+{percentile_rows}
+
+---
+
+## 布林带分析 (window={bollinger_window}, num_std={bollinger_std})
+
+| 指标 | 值 |
+|------|-----|
+| 上轨 | {bollinger_info['上轨']} |
+| 中轨 | {bollinger_info['中轨']} |
+| 下轨 | {bollinger_info['下轨']} |
+| 带宽 | {bollinger_info['带宽']} |
+| 带内位置 | {bollinger_info['带内位置']:.2%} |
+| 信号 | {bollinger_info['信号']} |
+
+![布林带分析](../../charts/{timestamp}/price_bollinger.png)
+
+---
+
+## RSI 分析
+
+| 指标 | 值 |
+|------|-----|
+| RSI(14) | {rsi_value:.2f} ({rsi_status}) |
+| RSI(6) | {rsi6_value:.2f} |
+
+![RSI分析](../../charts/{timestamp}/rsi_analysis.png)
+
+---
+
+## MACD 分析
+
+| 指标 | 值 |
+|------|-----|
+| MACD线 | {macd_line_val.iloc[-1]:.4f} |
+| 信号线 | {signal_line_val.iloc[-1]:.4f} |
+| 柱状图 | {hist_val:.4f} ({macd_trend}) |
+
+![MACD分析](../../charts/{timestamp}/macd_analysis.png)
+
+---
+
+## 均线系统
+
+| 均线 | 价格 | 偏离 | 方向 |
+|------|------|------|------|
+{ma_rows}
+
+![均线系统](../../charts/{timestamp}/ma_system.png)
+
+---
+
+## 支撑位与阻力位
+
+### 阻力位 (由近到远)
+
+| 名称 | 价格 | 距当前 |
+|------|------|--------|
+{resistance_rows}
+
+**当前价格**: {currency}{current_price:.2f}
+
+### 支撑位 (由近到远)
+
+| 名称 | 价格 | 距当前 |
+|------|------|--------|
+{support_rows}
+
+![支撑阻力位](../../charts/{timestamp}/support_resistance.png)
+
+---
+
+## 波动率分析
+
+| 指标 | 值 |
+|------|-----|
+| 日波动率 | {vol_info['日波动率']}% |
+| 年化波动率 | {vol_info['年化波动率']}% |
+| ATR(14) | {vol_info['ATR(14)']} |
+
+---
+
+## 买入成功概率估算
+
+| 项目 | 值 |
+|------|-----|
+| 综合评分 | {success_prob}/100 |
+| 判断 | {prob_label} |
+
+---
+
+## 今日交易建议
+
+### 近期走势
+
+| 周期 | 涨跌 |
+|------|------|
+{recent_returns}
+
+### 最优策略
+
+**{best_strategy_name}** ({params_str})
+
+回测表现: 收益 {best_metrics.get('total_return', 0):+.2f}%, 夏普 {best_metrics.get('sharpe_ratio', 0):.4f}, 回撤 {best_metrics.get('max_drawdown', 0):.2f}%
+
+### 基于布林带的价格参考
+
+| 项目 | 价格 |
+|------|------|
+| 当前价格 | {currency}{current_price:.2f} |
+| 理想买入价 (下轨) | {currency}{ideal_buy:.2f} |
+| 激进买入价 (中轨) | {currency}{bollinger_info['中轨']:.2f} |
+| 止损价 (下轨-1.5×ATR) | {currency}{stop_loss:.2f} |
+| 目标止盈价 (上轨) | {currency}{take_profit:.2f} |
+
+---
+
+## ⚠️ 风险提示
+
+- 以上分析基于历史数据回测，不构成投资建议
+- 过去表现不代表未来收益，市场存在不确定性
+- 建议控制单只股票仓位不超过总资产的 20%
+- 严格执行止损纪律，单笔亏损不超过总资产的 2%
+
+---
+
+*报告由 OpenQuant 通用股票分析工具自动生成*
+"""
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_content)
+    print(f"📄 Markdown 报告已保存到: {md_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="OpenQuant 通用股票分析工具 - 全策略回测 + 参数优化 + 交易建议"
@@ -743,6 +1188,54 @@ def main():
         vol_info,
     )
 
+    # ========== 第七步: 生成图表和 Markdown 报告 ==========
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    charts_dir = f"output/charts/{timestamp}"
+    md_dir = f"output/md/{timestamp}"
+
+    print("\n🎨 正在生成图表...")
+    generate_charts(
+        df, symbol, charts_dir, all_results,
+        bollinger_window, bollinger_std,
+    )
+
+    print("📝 正在生成 Markdown 报告...")
+    generate_markdown_report(
+        symbol=symbol,
+        market_key=market_key,
+        timestamp=timestamp,
+        md_dir=md_dir,
+        charts_dir=charts_dir,
+        df=df,
+        all_results=all_results,
+        best_strategy_name=best_strategy_name,
+        best_params=best_params if best_params else {},
+        best_metrics=final_metrics,
+        bollinger_info=bollinger_info,
+        rsi_value=rsi_value,
+        macd_hist=macd_hist,
+        vol_info=vol_info,
+        bollinger_window=bollinger_window,
+        bollinger_std=bollinger_std,
+    )
+
+    # ========== 第八步: 导出 PDF ==========
+    pdf_dir = f"output/pdf/{timestamp}"
+    md_file_path = f"{md_dir}/analyze_{symbol}.md"
+    pdf_file_path = f"{pdf_dir}/analyze_{symbol}.pdf"
+    print("📑 正在导出 PDF...")
+    try:
+        convert_md_to_pdf(md_file_path, pdf_file_path)
+        print(f"📑 PDF 已保存到: {pdf_file_path}")
+    except Exception as exc:
+        print(f"⚠️ PDF 导出失败: {exc}")
+
+    print(f"\n{'='*70}")
+    print(f"  ✅ 分析完成!")
+    print(f"  📁 图表目录: {charts_dir}/")
+    print(f"  📁 报告目录: {md_dir}/")
+    print(f"  📁 PDF 目录:  {pdf_dir}/")
+    print(f"{'='*70}")
 
 if __name__ == "__main__":
     main()
