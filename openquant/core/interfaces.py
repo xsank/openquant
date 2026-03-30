@@ -11,6 +11,8 @@ import pandas as pd
 
 from openquant.core.models import (
     Bar,
+    EventFactor,
+    EventType,
     FrequencyType,
     MarketType,
     Order,
@@ -156,6 +158,64 @@ class StrategyInterface(abc.ABC):
 
     def on_finish(self, portfolio: Portfolio) -> None:
         """策略结束回调（可选覆盖）"""
+
+
+class EventSourceInterface(abc.ABC):
+    """事件数据源抽象接口
+
+    所有事件数据源必须实现此接口，用于获取影响股价的离散事件数据，
+    如财报发布、分红派息、大宗交易、股东增减持、新闻舆情等。
+    """
+
+    @abc.abstractmethod
+    def get_name(self) -> str:
+        """返回事件数据源名称"""
+
+    @abc.abstractmethod
+    def get_supported_event_types(self) -> list[EventType]:
+        """返回支持的事件类型列表"""
+
+    @abc.abstractmethod
+    def fetch_events(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        event_types: list[EventType] | None = None,
+        market: MarketType = MarketType.A_SHARE,
+    ) -> list[EventFactor]:
+        """获取指定标的在时间范围内的事件列表
+
+        Args:
+            symbol: 标的代码
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+            event_types: 要获取的事件类型列表，None 表示获取所有类型
+            market: 市场类型
+
+        Returns:
+            事件因子列表，按事件日期排序
+        """
+
+    @abc.abstractmethod
+    def fetch_latest_events(
+        self,
+        symbol: str,
+        event_types: list[EventType] | None = None,
+        market: MarketType = MarketType.A_SHARE,
+        limit: int = 10,
+    ) -> list[EventFactor]:
+        """获取最新的事件列表（用于实时/模拟交易）
+
+        Args:
+            symbol: 标的代码
+            event_types: 要获取的事件类型列表
+            market: 市场类型
+            limit: 最大返回数量
+
+        Returns:
+            事件因子列表，按事件日期倒序
+        """
 
 
 class EngineInterface(abc.ABC):

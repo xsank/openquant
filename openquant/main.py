@@ -28,6 +28,7 @@ from openquant.strategy.macd_strategy import MACDStrategy
 from openquant.strategy.rsi_strategy import RSIReversalStrategy
 from openquant.strategy.turtle_strategy import TurtleStrategy
 from openquant.strategy.volume_breakout_strategy import VolumeBreakoutStrategy
+from openquant.strategy.event_enhanced_ma_cross import EventEnhancedMACrossStrategy
 from openquant.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -41,6 +42,7 @@ _STRATEGY_REGISTRY = {
     "kdj": KDJStrategy,
     "dual_momentum": DualMomentumStrategy,
     "volume_breakout": VolumeBreakoutStrategy,
+    "event_ma_cross": EventEnhancedMACrossStrategy,
 }
 
 _MARKET_MAP = {
@@ -93,6 +95,25 @@ def run_backtest(args: argparse.Namespace) -> None:
     )
     engine.set_strategy(strategy)
     engine.add_data(args.symbol, df, market)
+
+    # 加载事件因子数据
+    if getattr(args, "with_events", False):
+        try:
+            from openquant.datasource.composite_event_source import CompositeEventSource
+            event_source = CompositeEventSource()
+            logger.info(
+                "正在获取 %s 的事件因子数据 (市场: %s, 数据源路由: %s)...",
+                args.symbol, market.value,
+                event_source.list_market_sources().get(market.value, []),
+            )
+            events = event_source.fetch_events(args.symbol, args.start_date, args.end_date, market=market)
+            if events:
+                engine.add_events(args.symbol, events)
+                logger.info("加载了 %d 个事件因子", len(events))
+            else:
+                logger.info("未获取到事件因子数据")
+        except Exception as exc:
+            logger.warning("获取事件因子数据失败: %s", exc)
 
     # 加载基准数据
     benchmark_df = None
@@ -531,6 +552,7 @@ def main() -> None:
     backtest_parser.add_argument("--db-path", default="data/openquant.db", help="数据库路径")
     backtest_parser.add_argument("--benchmark", default=None, help="基准标的代码 (如 sh.000300 沪深300)")
     backtest_parser.add_argument("--output-dir", default="output/charts", help="图表输出目录")
+    backtest_parser.add_argument("--with-events", action="store_true", help="启用事件因子（财报、分红、大宗交易等）")
 
     # 模拟交易命令
     sim_parser = subparsers.add_parser("simulate", help="模拟交易")

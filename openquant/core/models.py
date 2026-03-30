@@ -42,6 +42,29 @@ class FrequencyType(enum.Enum):
     MONTHLY = "monthly"
 
 
+class EventType(enum.Enum):
+    """事件类型"""
+    EARNINGS = "earnings"              # 财报发布
+    DIVIDEND = "dividend"              # 分红派息
+    BLOCK_TRADE = "block_trade"        # 大宗交易
+    SHAREHOLDER = "shareholder"        # 股东增减持
+    INSIDER = "insider"                # 内部人交易
+    ANALYST_UPGRADE = "analyst_upgrade"    # 分析师上调评级
+    ANALYST_DOWNGRADE = "analyst_downgrade"  # 分析师下调评级
+    NEWS_POSITIVE = "news_positive"    # 正面新闻/舆情
+    NEWS_NEGATIVE = "news_negative"    # 负面新闻/舆情
+    POLICY = "policy"                  # 政策/监管事件
+    BUYBACK = "buyback"                # 股票回购
+    CUSTOM = "custom"                  # 自定义事件
+
+
+class EventSentiment(enum.Enum):
+    """事件情绪方向"""
+    BULLISH = "bullish"      # 利多
+    BEARISH = "bearish"      # 利空
+    NEUTRAL = "neutral"      # 中性
+
+
 class OrderSide(enum.Enum):
     """订单方向"""
     BUY = "buy"
@@ -175,3 +198,33 @@ class Portfolio:
     @property
     def total_commission(self) -> float:
         return sum(trade.commission for trade in self.trade_history)
+
+
+@dataclass
+class EventFactor:
+    """事件因子
+
+    表示一个影响股价的离散事件，如财报发布、分红、大宗交易、新闻舆情等。
+    策略可根据事件的类型、情绪方向和强度来调整交易决策。
+    """
+    symbol: str
+    event_date: datetime
+    event_type: EventType
+    sentiment: EventSentiment
+    strength: float = 1.0
+    description: str = ""
+    source: str = ""
+    market: MarketType = MarketType.A_SHARE
+    extra: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "event_date": self.event_date.isoformat(),
+            "event_type": self.event_type.value,
+            "sentiment": self.sentiment.value,
+            "strength": self.strength,
+            "description": self.description,
+            "source": self.source,
+            "market": self.market.value,
+        }

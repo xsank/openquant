@@ -13,6 +13,9 @@ import pandas as pd
 from openquant.core.interfaces import StrategyInterface
 from openquant.core.models import (
     Bar,
+    EventFactor,
+    EventSentiment,
+    EventType,
     MarketType,
     Order,
     OrderSide,
@@ -29,9 +32,11 @@ class BaseStrategy(StrategyInterface):
         self._bar_history: dict[str, list[Bar]] = defaultdict(list)
         self._current_bar: Bar | None = None
         self._stop_loss_config = stop_loss_config
+        self._event_store: dict[str, list[EventFactor]] = defaultdict(list)
 
     def initialize(self, portfolio: Portfolio) -> None:
         self._bar_history.clear()
+        self._event_store.clear()
 
     def on_order_filled(self, order: Order, portfolio: Portfolio) -> None:
         pass
@@ -112,6 +117,90 @@ class BaseStrategy(StrategyInterface):
             return 0
         max_shares = int(cash / price)
         return (max_shares // lot_size) * lot_size
+
+    def load_events(self, symbol: str, events: list[EventFactor]) -> None:
+        """加载事件因子数据（由引擎在回测前调用）"""
+        self._event_store[symbol] = sorted(events, key=lambda e: e.event_date)
+
+    def get_events_on_date(self, symbol: str, target_date: datetime) -> list[EventFactor]:
+        """获取指定日期的事件列表"""
+        target = target_date.date() if hasattr(target_date, 'date') else target_date
+        return [
+            e for e in self._event_store.get(symbol, [])
+            if e.event_date.date() == target
+        ]
+
+    def get_events_in_window(
+        self,
+        symbol: str,
+        end_date: datetime,
+        lookback_days: int = 5,
+    ) -> list[EventFactor]:
+        """获取最近 N 天内的事件列表"""
+        end = pd.Timestamp(end_date)
+        start = end - pd.Timedelta(days=lookback_days)
+        return [
+            e for e in self._event_store.get(symbol, [])
+            if start <= pd.Timestamp(e.event_date) <= end
+        ]
+
+    def compute_event_score(
+        self,
+        symbol: str,
+        current_date: datetime,
+        lookback_days: int = 5,
+        decay_factor: float = 0.8,
+    ) -> float:
+        """计算综合事件得分
+
+        将近期事件按时间衰减加权汇总，利多为正、利空为负。
+        得分范围大致在 [-3, +3]，0 表示无事件或中性。
+
+        Args:
+            symbol: 标的代码
+            current_date: 当前日期
+            lookback_days: 回看天数
+            decay_factor: 每天的衰减系数 (0~1)
+
+        Returns:
+            综合事件得分
+        """
+        recent_events = self.get_events_in_window(symbol, current_date, lookback_days)
+        if not recent_events:
+            return 0.0
+
+        score = 0.0
+        current_ts = pd.Timestamp(current_date)
+        for event in recent_events:
+            days_ago = (current_ts - pd.Timestamp(event.event_date)).days
+            weight = decay_factor ** max(days_ago, 0)
+
+            if event.sentiment == EventSentiment.BULLISH:
+                score += event.strength * weight
+            elif event.sentiment == EventSentiment.BEARISH:
+                score -= event.strength * weight
+
+        return score
+
+    def has_bearish_event(
+        self,
+        symbol: str,
+        current_date: datetime,
+        lookback_days: int = 3,
+        threshold: float = 0.5,
+    ) -> bool:
+        """检查近期是否有显著利空事件"""
+        return self.compute_event_score(symbol, current_date, lookback_days) < -threshold
+
+    def has_bullish_event(
+        self,
+        symbol: str,
+        current_date: datetime,
+        lookback_days: int = 3,
+        threshold: float = 0.5,
+    ) -> bool:
+        """检查近期是否有显著利多事件"""
+        return self.compute_event_score(symbol, current_date, lookback_days) > threshold
 
     @property
     def stop_loss_config(self) -> StopLossConfig | None:

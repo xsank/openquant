@@ -15,6 +15,7 @@ from openquant.core.exceptions import InsufficientFundsError, InsufficientPositi
 from openquant.core.interfaces import EngineInterface, StrategyInterface
 from openquant.core.models import (
     Bar,
+    EventFactor,
     FrequencyType,
     MarketType,
     Order,
@@ -57,6 +58,7 @@ class BacktestEngine(EngineInterface):
         self._risk_manager = risk_manager
         self._benchmark_data: pd.DataFrame | None = None
         self._benchmark_symbol: str | None = None
+        self._event_data: dict[str, list[EventFactor]] = {}
 
     def set_strategy(self, strategy: StrategyInterface) -> None:
         self._strategy = strategy
@@ -79,6 +81,16 @@ class BacktestEngine(EngineInterface):
         if missing:
             raise ValueError(f"数据缺少必要列: {missing}")
         self._data_feeds.append((symbol, data.sort_values("datetime").reset_index(drop=True), market))
+
+    def add_events(self, symbol: str, events: list[EventFactor]) -> None:
+        """添加事件因子数据
+
+        Args:
+            symbol: 标的代码
+            events: 事件因子列表
+        """
+        self._event_data[symbol] = sorted(events, key=lambda e: e.event_date)
+        logger.info("加载 %s 的 %d 个事件因子", symbol, len(events))
 
     def set_benchmark(self, symbol: str, data: pd.DataFrame) -> None:
         """设置基准数据用于对比分析
@@ -107,6 +119,12 @@ class BacktestEngine(EngineInterface):
         if self._risk_manager:
             self._risk_manager.reset()
         self._strategy.initialize(self._portfolio)
+
+        # 注入事件数据到策略（如果策略支持）
+        if self._event_data and hasattr(self._strategy, 'load_events'):
+            for symbol, events in self._event_data.items():
+                self._strategy.load_events(symbol, events)
+            logger.info("已注入 %d 个标的的事件因子数据到策略", len(self._event_data))
 
         # 合并所有数据并按时间排序
         all_bars = self._build_bar_sequence()
