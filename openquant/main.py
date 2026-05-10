@@ -563,7 +563,8 @@ def run_recommend(args: argparse.Namespace) -> None:
         strategy_registry=strategies,
         datasource_name=args.datasource,
         initial_capital=args.capital,
-        lookback_weeks=args.weeks,
+        train_weeks=args.train_weeks,
+        rolling_rounds=args.rolling_rounds,
     )
 
     recommendations = screener.screen_stocks(stock_configs, end_date=args.end_date)
@@ -630,7 +631,8 @@ def main() -> None:
         "--stocks", nargs="+", required=True,
         help="标的列表，格式: market:symbol:name (如 hk_stock:00700:腾讯)",
     )
-    recommend_parser.add_argument("--weeks", type=int, default=9, help="回测周数（默认9周）")
+    recommend_parser.add_argument("--train-weeks", type=int, default=20, help="训练窗口周数（默认20周）")
+    recommend_parser.add_argument("--rolling-rounds", type=int, default=15, help="滚动验证轮数（默认15轮）")
     recommend_parser.add_argument("--end-date", default=None, help="结束日期 (YYYY-MM-DD)，默认今天")
     recommend_parser.add_argument("--datasource", default="akshare", help="数据源名称")
     recommend_parser.add_argument("--capital", type=float, default=100000, help="初始资金")

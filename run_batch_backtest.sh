@@ -1,13 +1,13 @@
 #!/bin/bash
 # OpenQuant 批量回测脚本
-# 对港股、A股、美股的12只标的使用全部8种策略进行回测
+# 对港股、A股、美股的13只标的使用全部8种策略进行回测
 # 回测区间: 2025-01-01 ~ 2026-01-01
 
 cd "$(dirname "$0")"
 
 echo "============================================================"
 echo "  OpenQuant 批量回测"
-echo "  标的: 12只 (港股3 + A股2 + 美股7)"
+echo "  标的: 13只 (港股3 + A股2 + 美股8)"
 echo "  策略: 8种 (ma_cross, macd, rsi_reversal, bollinger_band,"
 echo "         turtle, kdj, dual_momentum, volume_breakout)"
 echo "  区间: 2025-01-01 ~ 2026-01-01"
@@ -27,6 +27,7 @@ python -m openquant.main batch_backtest \
     us_stock:105.BILI:哔哩哔哩 \
     us_stock:105.TSM:台积电 \
     us_stock:105.AMD:AMD \
+    us_stock:105.BABA:阿里巴巴 \
   --start-date 2025-01-01 \
   --end-date 2026-01-01 \
   --datasource akshare \

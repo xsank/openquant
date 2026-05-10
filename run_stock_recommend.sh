@@ -1,15 +1,15 @@
 #!/bin/bash
-# OpenQuant 股票买入推荐脚本
-# 基于多策略综合分析，筛选最适合今日买入的股票
-# 回测区间: 近9周历史数据
+# OpenQuant 股票买入/卖出推荐脚本
+# 基于多策略 × 滚动窗口验证（Walk-Forward Analysis）
+# 训练窗口: 20周, 滚动验证: 15轮, 总数据需求: 约35周
 
 cd "$(dirname "$0")"
 
 echo "============================================================"
-echo "  OpenQuant 股票买入推荐"
-echo "  标的: 12只 (港股3 + A股2 + 美股7)"
+echo "  OpenQuant 股票买入/卖出推荐（滚动验证版）"
+echo "  标的: 13只 (港股3 + A股2 + 美股8)"
 echo "  策略: 8种综合分析"
-echo "  回测周期: 近9周"
+echo "  验证方式: 15轮滚动窗口 × 20周训练"
 echo "============================================================"
 
 python -m openquant.main recommend \
@@ -26,7 +26,9 @@ python -m openquant.main recommend \
     us_stock:105.BILI:哔哩哔哩 \
     us_stock:106.TSM:台积电 \
     us_stock:105.AMD:AMD \
-  --weeks 9 \
+    us_stock:105.BABA:阿里巴巴 \
+  --train-weeks 20 \
+  --rolling-rounds 15 \
   --datasource akshare \
   --capital 100000
 
