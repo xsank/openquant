@@ -30,6 +30,7 @@ class SignalResult:
     """单个策略对单只股票的信号结果"""
     strategy_name: str
     has_buy_signal: bool
+    has_sell_signal: bool = False
     total_return: float = 0.0
     win_rate: float = 0.0
     sharpe_ratio: float = 0.0
@@ -44,8 +45,10 @@ class StockRecommendation:
     display_name: str
     market: MarketType
     buy_probability: float = 0.0
+    sell_probability: float = 0.0
     composite_score: float = 0.0
     signal_count: int = 0
+    sell_signal_count: int = 0
     total_strategies: int = 0
     strategy_signals: list[SignalResult] = field(default_factory=list)
     latest_close: float = 0.0
@@ -186,6 +189,7 @@ class StockScreener:
         recommendation.strategy_signals = signal_results
         recommendation.total_strategies = len(signal_results)
         recommendation.signal_count = sum(1 for s in signal_results if s.has_buy_signal)
+        recommendation.sell_signal_count = sum(1 for s in signal_results if s.has_sell_signal)
 
         self._calculate_composite_score(recommendation)
         return recommendation
@@ -216,14 +220,15 @@ class StockScreener:
 
             results = engine.get_results()
 
-            # 检测最后几天是否有买入信号
-            has_buy_signal = self._detect_latest_buy_signal(
+            # 检测最后几天是否有买入/卖出信号
+            has_buy_signal, has_sell_signal = self._detect_latest_signals(
                 strategy_name, strategy_class, symbol, df, market
             )
 
             return SignalResult(
                 strategy_name=strategy_name,
                 has_buy_signal=has_buy_signal,
+                has_sell_signal=has_sell_signal,
                 total_return=results.get("total_return", 0.0),
                 win_rate=results.get("win_rate", 0.0),
                 sharpe_ratio=results.get("sharpe_ratio", 0.0),
@@ -236,31 +241,35 @@ class StockScreener:
         finally:
             storage.close()
 
-    def _detect_latest_buy_signal(
+    def _detect_latest_signals(
         self,
         strategy_name: str,
         strategy_class,
         symbol: str,
         df: pd.DataFrame,
         market: MarketType,
-    ) -> bool:
-        """检测最后交易日是否处于买入信号状态
+    ) -> tuple[bool, bool]:
+        """检测最后交易日是否处于买入/卖出信号状态
 
-        方法：用数据的最后3天分别作为结束点，观察策略是否产生买入订单
+        方法：模拟喂入所有历史K线，观察最后3天策略产生的订单类型。
+
+        Returns:
+            (has_buy_signal, has_sell_signal) 元组
         """
         from openquant.core.models import Bar, OrderSide, Portfolio
 
         if len(df) < 5:
-            return False
+            return False, False
 
         strategy = strategy_class()
         portfolio = Portfolio(initial_capital=self.initial_capital, cash=self.initial_capital)
         strategy.initialize(portfolio)
 
         buy_signal_in_recent_days = False
+        sell_signal_in_recent_days = False
         recent_window = min(3, len(df))
 
-        # 模拟喂入所有数据，观察最后几天是否有买入信号
+        # 模拟喂入所有数据，观察最后几天是否有买入/卖出信号
         for idx in range(len(df)):
             row = df.iloc[idx]
             bar = Bar(
@@ -280,9 +289,10 @@ class StockScreener:
                 for order in orders:
                     if order.side == OrderSide.BUY:
                         buy_signal_in_recent_days = True
-                        break
+                    elif order.side == OrderSide.SELL:
+                        sell_signal_in_recent_days = True
 
-        return buy_signal_in_recent_days
+        return buy_signal_in_recent_days, sell_signal_in_recent_days
 
     def _calculate_composite_score(self, recommendation: StockRecommendation) -> None:
         """计算综合评分和买入概率
@@ -341,53 +351,136 @@ class StockScreener:
             signal_boost = min(1.0 + (signal_count / total) * 0.5, 1.5)
             recommendation.buy_probability = min(composite_score * signal_boost * 100, 99.0)
 
+        # 卖出概率计算
+        self._calculate_sell_probability(recommendation)
+
+    def _calculate_sell_probability(self, recommendation: StockRecommendation) -> None:
+        """计算卖出概率
+
+        评分因素：
+        1. 卖出信号覆盖率（多少策略给出卖出信号）- 权重40%
+        2. 回测亏损程度（负收益越大越该卖）- 权重25%
+        3. 最大回撤（回撤越大越危险）- 权重20%
+        4. 夏普比率（越低表示风险收益比越差）- 权重15%
+        """
+        signals = recommendation.strategy_signals
+        if not signals:
+            recommendation.sell_probability = 0.0
+            return
+
+        total = recommendation.total_strategies
+        sell_count = recommendation.sell_signal_count
+
+        # 卖出信号覆盖率 [0, 1]
+        sell_coverage = sell_count / total if total > 0 else 0.0
+
+        # 对有卖出信号的策略计算指标
+        bearish_signals = [s for s in signals if s.has_sell_signal]
+
+        if bearish_signals:
+            avg_return = sum(s.total_return for s in bearish_signals) / len(bearish_signals)
+            avg_drawdown = sum(abs(s.max_drawdown) for s in bearish_signals) / len(bearish_signals)
+            avg_sharpe = sum(s.sharpe_ratio for s in bearish_signals) / len(bearish_signals)
+        else:
+            avg_return = sum(s.total_return for s in signals) / len(signals)
+            avg_drawdown = sum(abs(s.max_drawdown) for s in signals) / len(signals)
+            avg_sharpe = sum(s.sharpe_ratio for s in signals) / len(signals)
+
+        # 归一化 - 注意方向与买入相反
+        # 收益越差（越负），卖出得分越高
+        loss_score = min(max((-avg_return + 20) / 40, 0), 1.0)  # [+20%, -20%] -> [0, 1]
+        # 回撤越大，卖出得分越高
+        drawdown_score = min(max(avg_drawdown / 20, 0), 1.0)    # [0%, 20%] -> [0, 1]
+        # 夏普越低，卖出得分越高
+        sharpe_inverse_score = min(max((1 - avg_sharpe) / 4, 0), 1.0)  # [3, -1] -> [0, 1]
+
+        # 加权卖出综合评分
+        sell_composite = (
+            0.40 * sell_coverage
+            + 0.25 * loss_score
+            + 0.20 * drawdown_score
+            + 0.15 * sharpe_inverse_score
+        )
+
+        # 卖出概率计算
+        if sell_count == 0:
+            recommendation.sell_probability = sell_composite * 0.1 * 100
+        else:
+            sell_boost = min(1.0 + (sell_count / total) * 0.5, 1.5)
+            recommendation.sell_probability = min(sell_composite * sell_boost * 100, 99.0)
+
 
 def print_recommendations(recommendations: list[StockRecommendation]) -> None:
     """格式化输出推荐结果"""
-    print("\n" + "=" * 70)
-    print("  📊 股票买入推荐 - 基于多策略综合分析")
+    print("\n" + "=" * 78)
+    print("  📊 股票多策略综合分析 - 买入/卖出概率")
     print(f"  分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print("=" * 70)
+    print("=" * 78)
 
     if not recommendations:
         print("  ⚠️ 无推荐结果")
         return
 
-    print(f"\n  {'排名':<4} {'股票':<12} {'买入概率':<10} {'信号数':<8} {'最新价':<10} {'综合评分':<8}")
-    print("  " + "-" * 62)
+    # 综合表格：同时展示买入和卖出概率
+    print(f"\n  {'排名':<4} {'股票':<10} {'买入概率':<10} {'卖出概率':<10} {'买信号':<7} {'卖信号':<7} {'最新价':<10} {'建议':<6}")
+    print("  " + "-" * 72)
 
     for rank, rec in enumerate(recommendations, 1):
-        prob_bar = "█" * int(rec.buy_probability / 5) + "░" * (20 - int(rec.buy_probability / 5))
-        signal_str = f"{rec.signal_count}/{rec.total_strategies}"
+        buy_signal_str = f"{rec.signal_count}/{rec.total_strategies}"
+        sell_signal_str = f"{rec.sell_signal_count}/{rec.total_strategies}"
 
-        # 信号强度标识
-        if rec.buy_probability >= 60:
-            emoji = "🟢"
-        elif rec.buy_probability >= 40:
-            emoji = "🟡"
+        # 操作建议
+        if rec.buy_probability >= 50 and rec.sell_probability < 20:
+            action = "买入 📈"
+        elif rec.sell_probability >= 50 and rec.buy_probability < 20:
+            action = "卖出 📉"
+        elif rec.buy_probability >= 30 and rec.sell_probability < 30:
+            action = "观望偏多"
+        elif rec.sell_probability >= 30 and rec.buy_probability < 30:
+            action = "观望偏空"
         else:
-            emoji = "🔴"
+            action = "观望 ⏸️"
+
+        # 买入信号标识
+        if rec.buy_probability >= 60:
+            buy_emoji = "🟢"
+        elif rec.buy_probability >= 40:
+            buy_emoji = "🟡"
+        else:
+            buy_emoji = "⚪"
+
+        # 卖出信号标识
+        if rec.sell_probability >= 60:
+            sell_emoji = "🔴"
+        elif rec.sell_probability >= 40:
+            sell_emoji = "🟠"
+        else:
+            sell_emoji = "⚪"
 
         print(
-            f"  {emoji} {rank:<3} {rec.display_name:<10} "
-            f"{rec.buy_probability:>5.1f}%     {signal_str:<7} "
-            f"{rec.latest_close:>8.2f}   {rec.composite_score:.3f}"
+            f"  {rank:<3} {rec.display_name:<10}"
+            f"{buy_emoji}{rec.buy_probability:>5.1f}%    "
+            f"{sell_emoji}{rec.sell_probability:>5.1f}%    "
+            f"{buy_signal_str:<6} {sell_signal_str:<6} "
+            f"{rec.latest_close:>8.2f}   {action}"
         )
 
     # 详细信号分析
-    print("\n" + "-" * 70)
+    print("\n" + "-" * 78)
     print("  📋 详细策略信号分析")
-    print("-" * 70)
+    print("-" * 78)
 
-    top_stocks = [r for r in recommendations if r.buy_probability >= 30][:5]
-    if not top_stocks:
-        top_stocks = recommendations[:3]
+    # 展示买入概率最高的几只
+    top_buy = [r for r in recommendations if r.buy_probability >= 30][:5]
+    if not top_buy:
+        top_buy = recommendations[:3]
 
-    for rec in top_stocks:
-        print(f"\n  【{rec.display_name}】({rec.symbol}) - 买入概率: {rec.buy_probability:.1f}%")
+    for rec in top_buy:
+        print(f"\n  【{rec.display_name}】({rec.symbol}) - 买入: {rec.buy_probability:.1f}% | 卖出: {rec.sell_probability:.1f}%")
+
         bullish_strategies = [s for s in rec.strategy_signals if s.has_buy_signal]
         if bullish_strategies:
-            print(f"    ✅ 发出买入信号的策略:")
+            print(f"    📈 买入信号策略:")
             for sig in bullish_strategies:
                 print(
                     f"       - {sig.strategy_name}: "
@@ -395,17 +488,40 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
                     f"胜率={sig.win_rate:.1f}%, "
                     f"夏普={sig.sharpe_ratio:.3f}"
                 )
-        else:
-            print("    ❌ 无策略发出买入信号")
 
-        bearish_strategies = [s for s in rec.strategy_signals if not s.has_buy_signal and s.total_trades > 0]
+        bearish_strategies = [s for s in rec.strategy_signals if s.has_sell_signal]
         if bearish_strategies:
-            names = ", ".join(s.strategy_name for s in bearish_strategies[:4])
-            remaining = len(bearish_strategies) - 4
+            print(f"    📉 卖出信号策略:")
+            for sig in bearish_strategies:
+                print(
+                    f"       - {sig.strategy_name}: "
+                    f"收益率={sig.total_return:.2f}%, "
+                    f"回撤={sig.max_drawdown:.2f}%"
+                )
+
+        neutral_strategies = [
+            s for s in rec.strategy_signals
+            if not s.has_buy_signal and not s.has_sell_signal and s.total_trades > 0
+        ]
+        if neutral_strategies:
+            names = ", ".join(s.strategy_name for s in neutral_strategies[:4])
+            remaining = len(neutral_strategies) - 4
             if remaining > 0:
                 names += f" 等{remaining}个"
             print(f"    ⏸️  观望策略: {names}")
 
-    print("\n" + "=" * 70)
+    # 卖出风险提示
+    high_sell = [r for r in recommendations if r.sell_probability >= 40]
+    if high_sell:
+        print(f"\n  {'⚠️ 卖出风险提示':}")
+        for rec in high_sell:
+            sell_strategies = [s for s in rec.strategy_signals if s.has_sell_signal]
+            strategy_names = ", ".join(s.strategy_name for s in sell_strategies[:3])
+            print(
+                f"    🔴 {rec.display_name}: 卖出概率 {rec.sell_probability:.1f}% "
+                f"(触发策略: {strategy_names})"
+            )
+
+    print("\n" + "=" * 78)
     print("  ⚠️ 免责声明: 以上分析仅供参考，不构成投资建议")
-    print("=" * 70 + "\n")
+    print("=" * 78 + "\n")
