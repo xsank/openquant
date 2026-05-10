@@ -8,12 +8,96 @@ import logging
 
 import akshare as ak
 import pandas as pd
+import requests
 
 from openquant.core.exceptions import DataSourceError
 from openquant.core.interfaces import DataSourceInterface
 from openquant.core.models import FrequencyType, MarketType
 
 logger = logging.getLogger(__name__)
+
+
+_EASTMONEY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://quote.eastmoney.com/",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+# 东方财富 push2his CDN 节点前缀池（按可用性排序，覆盖尽量多的可用节点）
+_EASTMONEY_NODE_PREFIXES = [
+    "80", "87", "90", "95", "75", "60", "20", "33", "40", "50",
+    "55", "70", "85", "2", "3", "5", "10", "15", "25", "30", "45",
+]
+
+
+def _patch_requests_for_eastmoney():
+    """Monkey-patch requests.get，解决东方财富 push2his 接口连接被拒绝的问题。
+
+    根因: 当前网络环境下东方财富部分 CDN 节点(如 63)会直接关闭 TLS 连接，
+    导致 AKShare 请求时触发 RemoteDisconnected 异常。
+
+    修复方案:
+    1. 为所有东方财富请求注入必要的 Referer/User-Agent headers
+    2. 当节点连接失败时，自动轮转到其他 CDN 节点重试（最多尝试全部节点池）
+    3. 节点之间加入 1 秒间隔，避免过于密集的请求
+    """
+    import time as _time
+    import re as _re
+
+    _original_get = requests.get
+
+    # 匹配东方财富 push2his 域名
+    _push2his_pattern = _re.compile(r"https?://(\d+\.)?push2his\.eastmoney\.com")
+
+    def _patched_get(url, **kwargs):
+        if not isinstance(url, str) or "eastmoney" not in url:
+            return _original_get(url, **kwargs)
+
+        # 注入 headers
+        headers = kwargs.get("headers") or {}
+        kwargs["headers"] = {**_EASTMONEY_HEADERS, **headers}
+
+        # 如果不是 push2his 接口，直接请求
+        if not _push2his_pattern.search(url):
+            return _original_get(url, **kwargs)
+
+        # 对 push2his 接口进行节点轮转重试
+        last_error = None
+
+        # 先尝试原始 URL
+        try:
+            return _original_get(url, **kwargs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last_error = exc
+            logger.debug("东方财富原始节点失败，开始轮转: %s", url)
+
+        # 原始节点失败，逐个尝试节点池中的 CDN 节点
+        for prefix in _EASTMONEY_NODE_PREFIXES:
+            alt_url = _push2his_pattern.sub(
+                f"https://{prefix}.push2his.eastmoney.com", url
+            )
+            if alt_url == url:
+                continue
+            try:
+                _time.sleep(1)
+                resp = _original_get(alt_url, **kwargs)
+                return resp
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                continue
+
+        # 所有节点都失败，抛出最后的异常
+        raise last_error
+
+    requests.get = _patched_get
+
+
+# 在模块加载时执行 patch
+_patch_requests_for_eastmoney()
 
 
 class AkshareDataSource(DataSourceInterface):

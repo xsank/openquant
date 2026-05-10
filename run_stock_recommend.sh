@@ -22,9 +22,9 @@ python -m openquant.main recommend \
     us_stock:105.GOOG:谷歌 \
     us_stock:105.PDD:拼多多 \
     us_stock:105.TCOM:携程 \
-    us_stock:105.ZH:知乎 \
+    us_stock:106.ZH:知乎 \
     us_stock:105.BILI:哔哩哔哩 \
-    us_stock:105.TSM:台积电 \
+    us_stock:106.TSM:台积电 \
     us_stock:105.AMD:AMD \
   --weeks 9 \
   --datasource akshare \
