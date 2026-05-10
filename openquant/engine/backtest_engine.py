@@ -193,6 +193,10 @@ class BacktestEngine(EngineInterface):
         metrics["total_trades"] = len(self._portfolio.trade_history) if self._portfolio else 0
         metrics["total_commission"] = self._portfolio.total_commission if self._portfolio else 0
 
+        # 交易级指标：基于 trade_history 计算
+        trade_metrics = self._calculate_trade_metrics()
+        metrics.update(trade_metrics)
+
         # 基准对比指标
         if self._benchmark_data is not None:
             benchmark_equity = self._build_benchmark_equity(equity_series)
@@ -204,6 +208,90 @@ class BacktestEngine(EngineInterface):
                 metrics["benchmark_symbol"] = self._benchmark_symbol or ""
 
         return metrics
+
+    def _calculate_trade_metrics(self) -> dict:
+        """基于交易记录计算交易级指标：交易胜率、盈亏比、平均持仓天数、交易频率
+
+        未平仓持仓按当前市价视为强制平仓，纳入盈亏比计算，
+        避免"只统计已平仓盈利交易"导致盈亏比虚高的问题。
+        """
+        if not self._portfolio or not self._portfolio.trade_history:
+            return {
+                "trade_win_rate": 0.0,
+                "profit_factor": 0.0,
+                "avg_holding_days": 0.0,
+                "trade_frequency": 0.0,
+            }
+
+        trades = self._portfolio.trade_history
+        from collections import defaultdict
+        buy_queue: dict[str, list] = defaultdict(list)
+        completed_trades: list[dict] = []
+
+        # 配对已完成的买卖交易
+        for trade in sorted(trades, key=lambda t: t.traded_at):
+            if trade.side == OrderSide.BUY:
+                buy_queue[trade.symbol].append(trade)
+            elif trade.side == OrderSide.SELL:
+                if buy_queue[trade.symbol]:
+                    buy_trade = buy_queue[trade.symbol].pop(0)
+                    pnl = (trade.price - buy_trade.price) * trade.quantity - trade.commission - buy_trade.commission
+                    holding_days = (trade.traded_at - buy_trade.traded_at).days
+                    completed_trades.append({
+                        "pnl": pnl,
+                        "holding_days": max(holding_days, 1),
+                    })
+
+        # 将未平仓持仓按当前市价视为强制平仓
+        last_datetime = self._equity_curve[-1][0] if self._equity_curve else None
+        for symbol, pending_buys in buy_queue.items():
+            for buy_trade in pending_buys:
+                current_price = buy_trade.price
+                if symbol in self._portfolio.positions:
+                    current_price = self._portfolio.positions[symbol].current_price
+                pnl = (current_price - buy_trade.price) * buy_trade.quantity - buy_trade.commission
+                holding_days = (last_datetime - buy_trade.traded_at).days if last_datetime else 1
+                completed_trades.append({
+                    "pnl": pnl,
+                    "holding_days": max(holding_days, 1),
+                })
+
+        total_completed = len(completed_trades)
+        if total_completed == 0:
+            total_days = len(self._equity_curve) if self._equity_curve else 1
+            weeks = max(total_days / 5, 1)
+            return {
+                "trade_win_rate": 0.0,
+                "profit_factor": 0.0,
+                "avg_holding_days": 0.0,
+                "trade_frequency": 0.0,
+            }
+
+        winning_trades = [t for t in completed_trades if t["pnl"] > 0]
+        losing_trades = [t for t in completed_trades if t["pnl"] <= 0]
+
+        trade_win_rate = len(winning_trades) / total_completed * 100
+        total_profit = sum(t["pnl"] for t in winning_trades)
+        total_loss = abs(sum(t["pnl"] for t in losing_trades))
+        raw_profit_factor = total_profit / total_loss if total_loss > 0 else (3.0 if total_profit > 0 else 0.0)
+        profit_factor = min(raw_profit_factor, 10.0)
+        avg_holding_days = sum(t["holding_days"] for t in completed_trades) / total_completed
+
+        total_days = len(self._equity_curve) if self._equity_curve else 1
+        weeks = max(total_days / 5, 1)
+        trade_frequency = total_completed / weeks
+
+        avg_win_pct = (sum(t["pnl"] for t in winning_trades) / len(winning_trades) / self.initial_capital * 100) if winning_trades else 0.0
+        avg_loss_pct = (abs(sum(t["pnl"] for t in losing_trades) / len(losing_trades)) / self.initial_capital * 100) if losing_trades else 0.0
+
+        return {
+            "trade_win_rate": round(trade_win_rate, 2),
+            "profit_factor": round(profit_factor, 2),
+            "avg_holding_days": round(avg_holding_days, 1),
+            "trade_frequency": round(trade_frequency, 2),
+            "avg_win_pct": round(avg_win_pct, 4),
+            "avg_loss_pct": round(avg_loss_pct, 4),
+        }
 
     def get_benchmark_equity_curve(self) -> pd.DataFrame:
         """获取基准权益曲线（归一化到与策略相同的初始资金）"""

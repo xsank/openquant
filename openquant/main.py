@@ -27,9 +27,11 @@ from openquant.strategy.ma_cross import MACrossStrategy
 from openquant.strategy.macd_strategy import MACDStrategy
 from openquant.strategy.rsi_strategy import RSIReversalStrategy
 from openquant.strategy.turtle_strategy import TurtleStrategy
+from openquant.strategy.trend_follow_strategy import TrendFollowStrategy
 from openquant.strategy.volume_breakout_strategy import VolumeBreakoutStrategy
 from openquant.strategy.event_enhanced_ma_cross import EventEnhancedMACrossStrategy
 from openquant.screener.stock_screener import StockScreener, BacktestValidator, print_recommendations, print_validation_results
+from openquant.screener.report_pdf import generate_recommend_pdf
 from openquant.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -43,8 +45,8 @@ _STRATEGY_REGISTRY = {
     "kdj": KDJStrategy,
     "dual_momentum": DualMomentumStrategy,
     "volume_breakout": VolumeBreakoutStrategy,
-        "event_ma_cross": EventEnhancedMACrossStrategy,
-    # 情绪增强策略（集成新闻+事件情绪权重因子）
+    "trend_follow": TrendFollowStrategy,
+    "event_ma_cross": EventEnhancedMACrossStrategy,
 }
 
 _MARKET_MAP = {
@@ -569,6 +571,7 @@ def run_recommend(args: argparse.Namespace) -> None:
 
     recommendations = screener.screen_stocks(stock_configs, end_date=args.end_date)
     print_recommendations(recommendations)
+    generate_recommend_pdf(recommendations)
 
 
 def run_validate(args: argparse.Namespace) -> None:

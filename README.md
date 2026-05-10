@@ -119,3 +119,7 @@ Comparison of the returns of the best and worst strategies for each target:
 | 小米 | KDJ | +16.03% |
 | 拼多多 | RSI Reversal | +14.02% |
 | 美团 | KDJ | +0.93% |
+
+
+
+
