@@ -29,6 +29,7 @@ from openquant.strategy.rsi_strategy import RSIReversalStrategy
 from openquant.strategy.turtle_strategy import TurtleStrategy
 from openquant.strategy.volume_breakout_strategy import VolumeBreakoutStrategy
 from openquant.strategy.event_enhanced_ma_cross import EventEnhancedMACrossStrategy
+from openquant.screener.stock_screener import StockScreener, print_recommendations
 from openquant.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -535,6 +536,40 @@ def run_optimize(args: argparse.Namespace) -> None:
     _print_results(best_result.metrics)
 
 
+def run_recommend(args: argparse.Namespace) -> None:
+    """执行股票买入推荐分析"""
+    # 解析标的配置
+    stock_configs = []
+    for item in args.stocks:
+        parts = item.split(":")
+        if len(parts) != 3:
+            logger.error("标的格式错误: %s，应为 market:symbol:name", item)
+            continue
+        market_key, symbol, display_name = parts
+        market = _MARKET_MAP.get(market_key)
+        if market is None:
+            logger.error("未知市场类型: %s", market_key)
+            continue
+        stock_configs.append((market, symbol, display_name))
+
+    if not stock_configs:
+        logger.error("无有效标的配置")
+        return
+
+    # 过滤掉需要事件数据的策略
+    strategies = {k: v for k, v in _STRATEGY_REGISTRY.items() if k != "event_ma_cross"}
+
+    screener = StockScreener(
+        strategy_registry=strategies,
+        datasource_name=args.datasource,
+        initial_capital=args.capital,
+        lookback_weeks=args.weeks,
+    )
+
+    recommendations = screener.screen_stocks(stock_configs, end_date=args.end_date)
+    print_recommendations(recommendations)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenQuant 量化交易系统")
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
@@ -589,6 +624,17 @@ def main() -> None:
     batch_parser.add_argument("--db-path", default="data/openquant.db", help="数据库路径")
     batch_parser.add_argument("--output-dir", default="output/charts", help="图表输出目录")
 
+    # 股票推荐命令
+    recommend_parser = subparsers.add_parser("recommend", help="股票买入推荐（多策略综合分析）")
+    recommend_parser.add_argument(
+        "--stocks", nargs="+", required=True,
+        help="标的列表，格式: market:symbol:name (如 hk_stock:00700:腾讯)",
+    )
+    recommend_parser.add_argument("--weeks", type=int, default=9, help="回测周数（默认9周）")
+    recommend_parser.add_argument("--end-date", default=None, help="结束日期 (YYYY-MM-DD)，默认今天")
+    recommend_parser.add_argument("--datasource", default="akshare", help="数据源名称")
+    recommend_parser.add_argument("--capital", type=float, default=100000, help="初始资金")
+
     # 参数优化命令
     optimize_parser = subparsers.add_parser("optimize", help="策略参数优化")
     optimize_parser.add_argument("--symbol", required=True, help="标的代码 (如 600519)")
@@ -623,6 +669,8 @@ def main() -> None:
         run_batch_backtest(args)
     elif args.command == "optimize":
         run_optimize(args)
+    elif args.command == "recommend":
+        run_recommend(args)
     else:
         parser.print_help()
 
