@@ -26,7 +26,7 @@ python -m openquant.main recommend \
     us_stock:105.BILI:哔哩哔哩 \
     us_stock:106.TSM:台积电 \
     us_stock:105.AMD:AMD \
-    us_stock:105.BABA:阿里巴巴 \
+    us_stock:106.BABA:阿里巴巴 \
   --train-weeks 20 \
   --rolling-rounds 15 \
   --datasource akshare \

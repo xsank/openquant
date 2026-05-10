@@ -29,7 +29,7 @@ from openquant.strategy.rsi_strategy import RSIReversalStrategy
 from openquant.strategy.turtle_strategy import TurtleStrategy
 from openquant.strategy.volume_breakout_strategy import VolumeBreakoutStrategy
 from openquant.strategy.event_enhanced_ma_cross import EventEnhancedMACrossStrategy
-from openquant.screener.stock_screener import StockScreener, print_recommendations
+from openquant.screener.stock_screener import StockScreener, BacktestValidator, print_recommendations, print_validation_results
 from openquant.utils.logger import setup_logger
 
 logger = setup_logger()
@@ -571,6 +571,50 @@ def run_recommend(args: argparse.Namespace) -> None:
     print_recommendations(recommendations)
 
 
+def run_validate(args: argparse.Namespace) -> None:
+    """执行历史回测验证，优化概率阈值"""
+    # 解析标的配置
+    stock_configs = []
+    for item in args.stocks:
+        parts = item.split(":")
+        if len(parts) != 3:
+            logger.error("标的格式错误: %s，应为 market:symbol:name", item)
+            continue
+        market_key, symbol, display_name = parts
+        market = _MARKET_MAP.get(market_key)
+        if market is None:
+            logger.error("未知市场类型: %s", market_key)
+            continue
+        stock_configs.append((market, symbol, display_name))
+
+    if not stock_configs:
+        logger.error("无有效标的配置")
+        return
+
+    # 过滤掉需要事件数据的策略
+    strategies = {k: v for k, v in _STRATEGY_REGISTRY.items() if k != "event_ma_cross"}
+
+    validator = BacktestValidator(
+        strategy_registry=strategies,
+        datasource_name=args.datasource,
+        initial_capital=args.capital,
+        train_weeks=args.train_weeks,
+        rolling_rounds=args.rolling_rounds,
+    )
+
+    buy_thresholds = [float(x) for x in args.buy_thresholds.split(",")]
+    sell_thresholds = [float(x) for x in args.sell_thresholds.split(",")]
+
+    results = validator.validate(
+        stock_configs,
+        validation_weeks=args.validation_weeks,
+        buy_thresholds=buy_thresholds,
+        sell_thresholds=sell_thresholds,
+    )
+
+    print_validation_results(results)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenQuant 量化交易系统")
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
@@ -637,6 +681,20 @@ def main() -> None:
     recommend_parser.add_argument("--datasource", default="akshare", help="数据源名称")
     recommend_parser.add_argument("--capital", type=float, default=100000, help="初始资金")
 
+    # 回测验证命令
+    validate_parser = subparsers.add_parser("validate", help="历史回测验证（优化概率阈值）")
+    validate_parser.add_argument(
+        "--stocks", nargs="+", required=True,
+        help="标的列表，格式: market:symbol:name (如 hk_stock:00700:腾讯)",
+    )
+    validate_parser.add_argument("--train-weeks", type=int, default=20, help="训练窗口周数（默认20周）")
+    validate_parser.add_argument("--rolling-rounds", type=int, default=15, help="滚动验证轮数（默认15轮）")
+    validate_parser.add_argument("--validation-weeks", type=int, default=20, help="验证窗口周数（默认20周）")
+    validate_parser.add_argument("--buy-thresholds", default="40,50,60,70,80", help="买入阈值列表，逗号分隔（默认40,50,60,70,80）")
+    validate_parser.add_argument("--sell-thresholds", default="40,50,60,70,80", help="卖出阈值列表，逗号分隔（默认40,50,60,70,80）")
+    validate_parser.add_argument("--datasource", default="akshare", help="数据源名称")
+    validate_parser.add_argument("--capital", type=float, default=100000, help="初始资金")
+
     # 参数优化命令
     optimize_parser = subparsers.add_parser("optimize", help="策略参数优化")
     optimize_parser.add_argument("--symbol", required=True, help="标的代码 (如 600519)")
@@ -673,6 +731,8 @@ def main() -> None:
         run_optimize(args)
     elif args.command == "recommend":
         run_recommend(args)
+    elif args.command == "validate":
+        run_validate(args)
     else:
         parser.print_help()
 

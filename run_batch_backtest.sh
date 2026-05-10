@@ -27,7 +27,7 @@ python -m openquant.main batch_backtest \
     us_stock:105.BILI:哔哩哔哩 \
     us_stock:105.TSM:台积电 \
     us_stock:105.AMD:AMD \
-    us_stock:105.BABA:阿里巴巴 \
+    us_stock:106.BABA:阿里巴巴 \
   --start-date 2025-01-01 \
   --end-date 2026-01-01 \
   --datasource akshare \

@@ -1,10 +1,13 @@
 """AKShare 数据源实现
 
 基于 akshare 库获取 A 股、港股、美股、基金等多市场行情数据。
+支持本地 CSV 缓存：已缓存的数据直接读取，避免频繁网络请求。
 """
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 
 import akshare as ak
 import pandas as pd
@@ -15,6 +18,11 @@ from openquant.core.interfaces import DataSourceInterface
 from openquant.core.models import FrequencyType, MarketType
 
 logger = logging.getLogger(__name__)
+
+# 本地缓存根目录（项目根下 data/cache/）
+_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cache"
+# 缓存数据必须包含的列（完整性校验）
+_REQUIRED_COLUMNS = {"datetime", "open", "high", "low", "close", "volume"}
 
 
 _EASTMONEY_HEADERS = {
@@ -101,7 +109,11 @@ _patch_requests_for_eastmoney()
 
 
 class AkshareDataSource(DataSourceInterface):
-    """AKShare 数据源，支持 A 股、港股、美股、基金等多市场"""
+    """AKShare 数据源，支持 A 股、港股、美股、基金等多市场
+
+    内置本地 CSV 缓存：首次获取数据后缓存到 data/cache/ 目录，
+    后续请求如果缓存已覆盖所需时间范围则直接返回本地数据，避免频繁网络请求。
+    """
 
     def get_name(self) -> str:
         return "akshare"
@@ -116,15 +128,79 @@ class AkshareDataSource(DataSourceInterface):
         end_date: str,
         market: MarketType = MarketType.A_SHARE,
     ) -> pd.DataFrame:
+        # 尝试从本地缓存读取
+        cached_df = _load_from_cache(symbol, start_date, end_date, market)
+        if cached_df is not None:
+            logger.debug("缓存命中: %s (%s ~ %s)", symbol, start_date, end_date)
+            return cached_df
+
+        # 缓存未命中，计算增量获取范围（避免只差几天却重新获取全量）
+        fetch_ranges = _calc_incremental_ranges(symbol, start_date, end_date, market)
+        has_existing_cache = _get_cache_path(symbol, market).exists()
+
         try:
             fetcher = _DAILY_FETCHERS.get(market)
             if fetcher is None:
                 raise DataSourceError(f"AKShare 不支持市场类型: {market}")
-            return fetcher(symbol, start_date, end_date)
+
+            incremental_frames = []
+            for fetch_start, fetch_end in fetch_ranges:
+                logger.debug("增量获取: %s (%s ~ %s)", symbol, fetch_start, fetch_end)
+                try:
+                    df_part = fetcher(symbol, fetch_start, fetch_end)
+                    if df_part is not None and not df_part.empty:
+                        incremental_frames.append(df_part)
+                except DataSourceError:
+                    # 增量段获取失败（如周末/节假日无数据），跳过该段
+                    logger.debug("增量段无数据，跳过: %s (%s ~ %s)", symbol, fetch_start, fetch_end)
+                    continue
+
+            if not incremental_frames and not has_existing_cache:
+                # 完全无缓存且网络也获取不到数据
+                raise DataSourceError(f"获取数据失败: {symbol} ({start_date} ~ {end_date})")
+
+            # 合并增量数据到缓存
+            if incremental_frames:
+                incremental_df = pd.concat(incremental_frames, ignore_index=True)
+                _save_to_cache(symbol, incremental_df, market)
+
         except DataSourceError:
+            # 如果已有缓存，增量获取失败时降级使用已有缓存
+            if has_existing_cache:
+                fallback = _load_from_cache_relaxed(symbol, start_date, end_date, market)
+                if fallback is not None:
+                    logger.info("增量获取失败，降级使用已有缓存: %s", symbol)
+                    return fallback
             raise
         except Exception as exc:
+            if has_existing_cache:
+                fallback = _load_from_cache_relaxed(symbol, start_date, end_date, market)
+                if fallback is not None:
+                    logger.info("增量获取异常，降级使用已有缓存: %s", symbol)
+                    return fallback
             raise DataSourceError(f"AKShare 获取日K线失败: {exc}") from exc
+
+        # 从更新后的缓存中读取完整请求范围的数据
+        result = _load_from_cache(symbol, start_date, end_date, market)
+        if result is not None:
+            return result
+
+        # 严格模式未命中，尝试宽松模式（容忍末尾几天缺失）
+        relaxed = _load_from_cache_relaxed(symbol, start_date, end_date, market)
+        if relaxed is not None:
+            return relaxed
+
+        # 兜底：返回增量数据本身
+        if incremental_frames:
+            combined = pd.concat(incremental_frames, ignore_index=True)
+            combined = combined.drop_duplicates(subset=["datetime"], keep="last")
+            combined = combined.sort_values("datetime").reset_index(drop=True)
+            request_start = pd.Timestamp(start_date)
+            request_end = pd.Timestamp(end_date)
+            mask = (combined["datetime"] >= request_start) & (combined["datetime"] <= request_end)
+            return combined[mask].reset_index(drop=True)
+
+        raise DataSourceError(f"获取数据失败: {symbol} ({start_date} ~ {end_date})")
 
     def fetch_minute_bars(
         self,
@@ -386,3 +462,196 @@ _DAILY_FETCHERS = {
     MarketType.US_STOCK: _fetch_us_daily,
     MarketType.FUND: _fetch_fund_daily,
 }
+
+
+# ========== 本地 CSV 缓存 ==========
+
+
+def _get_cache_path(symbol: str, market: MarketType) -> Path:
+    """获取缓存文件路径: data/cache/{market}/{symbol}.csv"""
+    safe_symbol = symbol.replace(".", "_").replace("/", "_")
+    return _CACHE_DIR / market.value / f"{safe_symbol}.csv"
+
+
+def _calc_incremental_ranges(
+    symbol: str, start_date: str, end_date: str, market: MarketType
+) -> list[tuple[str, str]]:
+    """计算需要增量获取的时间范围。
+
+    对比请求范围与已有缓存范围，只返回缓存未覆盖的部分：
+    - 如果无缓存：返回完整请求范围
+    - 如果缓存只覆盖中间段：返回前段 + 后段的增量
+    - 如果缓存只缺末尾几天：只返回末尾增量（从缓存最后日期+1天开始）
+    - 如果缓存只缺前面：只返回前段增量
+    """
+    cache_path = _get_cache_path(symbol, market)
+    if not cache_path.exists():
+        return [(start_date, end_date)]
+
+    try:
+        df = pd.read_csv(cache_path, parse_dates=["datetime"])
+    except Exception:
+        return [(start_date, end_date)]
+
+    if df.empty or not _REQUIRED_COLUMNS.issubset(set(df.columns)):
+        return [(start_date, end_date)]
+
+    cache_start = df["datetime"].min()
+    cache_end = df["datetime"].max()
+    request_start = pd.Timestamp(start_date)
+    request_end = pd.Timestamp(end_date)
+
+    ranges = []
+
+    # 前段：请求起始 早于 缓存起始（不使用容差，精确判断）
+    if request_start < cache_start - pd.Timedelta(days=1):
+        front_end = (cache_start - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        ranges.append((start_date, front_end))
+
+    # 后段：请求结束 晚于 缓存结束（只要缓存末尾 < 请求末尾就获取增量）
+    if request_end > cache_end:
+        back_start = (cache_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        ranges.append((back_start, end_date))
+
+    # 如果没有增量范围但 _load_from_cache 仍判定为未命中，
+    # 说明缓存覆盖但可能数据内容有问题，兜底获取全量
+    if not ranges:
+        return [(start_date, end_date)]
+
+    logger.info(
+        "增量获取 %s: 缓存[%s~%s], 请求[%s~%s], 增量段=%s",
+        symbol, cache_start.date(), cache_end.date(), start_date, end_date, ranges,
+    )
+    return ranges
+
+
+def _load_from_cache(
+    symbol: str, start_date: str, end_date: str, market: MarketType
+) -> pd.DataFrame | None:
+    """从本地缓存加载数据。
+
+    仅当缓存数据完全覆盖请求的时间范围时才返回，否则返回 None 触发网络获取。
+    """
+    cache_path = _get_cache_path(symbol, market)
+    if not cache_path.exists():
+        return None
+
+    try:
+        df = pd.read_csv(cache_path, parse_dates=["datetime"])
+    except Exception as exc:
+        logger.debug("读取缓存失败 %s: %s", cache_path, exc)
+        return None
+
+    # 完整性校验：必须包含必要列且数据非空
+    if df.empty or not _REQUIRED_COLUMNS.issubset(set(df.columns)):
+        logger.warning("缓存数据不完整，删除: %s", cache_path)
+        cache_path.unlink(missing_ok=True)
+        return None
+
+    # 时间范围校验：缓存必须覆盖请求的 start_date ~ end_date
+    request_start = pd.Timestamp(start_date)
+    request_end = pd.Timestamp(end_date)
+    cache_start = df["datetime"].min()
+    cache_end = df["datetime"].max()
+
+    # 缓存的起始日期必须 <= 请求起始日期（允许5天容差，应对节假日）
+    # 缓存的结束日期必须 >= 请求结束日期 - 3天（应对最新数据延迟）
+    start_covered = cache_start <= request_start + pd.Timedelta(days=5)
+    end_covered = cache_end >= request_end - pd.Timedelta(days=3)
+
+    if not (start_covered and end_covered):
+        logger.debug(
+            "缓存范围不足 %s: 缓存[%s~%s], 请求[%s~%s]",
+            symbol, cache_start.date(), cache_end.date(), start_date, end_date,
+        )
+        return None
+
+    # 按请求范围过滤返回
+    mask = (df["datetime"] >= request_start) & (df["datetime"] <= request_end)
+    filtered = df[mask].reset_index(drop=True)
+
+    # 过滤后不能为空（可能日期范围内确实无交易日，但正常股票不应如此）
+    if filtered.empty:
+        return None
+
+    return filtered
+
+
+def _load_from_cache_relaxed(
+    symbol: str, start_date: str, end_date: str, market: MarketType
+) -> pd.DataFrame | None:
+    """宽松模式从缓存加载数据。
+
+    与 _load_from_cache 不同，此函数容忍末尾缺失（如周末/节假日），
+    只要缓存起始覆盖且缓存中有足够的数据就返回。
+    用于增量获取失败时的降级回退。
+    """
+    cache_path = _get_cache_path(symbol, market)
+    if not cache_path.exists():
+        return None
+
+    try:
+        df = pd.read_csv(cache_path, parse_dates=["datetime"])
+    except Exception:
+        return None
+
+    if df.empty or not _REQUIRED_COLUMNS.issubset(set(df.columns)):
+        return None
+
+    request_start = pd.Timestamp(start_date)
+    request_end = pd.Timestamp(end_date)
+    cache_start = df["datetime"].min()
+
+    # 宽松模式：只要求缓存起始覆盖请求起始（5天容差）
+    if cache_start > request_start + pd.Timedelta(days=5):
+        return None
+
+    # 按请求范围过滤（末尾可能不到 request_end，但有数据就返回）
+    mask = (df["datetime"] >= request_start) & (df["datetime"] <= request_end)
+    filtered = df[mask].reset_index(drop=True)
+
+    if filtered.empty:
+        return None
+
+    return filtered
+
+
+def _save_to_cache(symbol: str, df: pd.DataFrame, market: MarketType) -> None:
+    """将数据保存到本地缓存。
+
+    缓存策略：与已有缓存合并（取并集），保留最大范围的数据。
+    安全措施：只缓存非空且列完整的 DataFrame，避免缓存空数据导致回测错误。
+    """
+    if df is None or df.empty:
+        logger.debug("数据为空，不缓存: %s", symbol)
+        return
+
+    if not _REQUIRED_COLUMNS.issubset(set(df.columns)):
+        logger.debug("数据列不完整，不缓存: %s (列: %s)", symbol, list(df.columns))
+        return
+
+    cache_path = _get_cache_path(symbol, market)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 确保 datetime 列是 Timestamp 类型
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["datetime"])
+
+    # 如果已有缓存，合并数据（取并集，去重保留最新）
+    if cache_path.exists():
+        try:
+            existing = pd.read_csv(cache_path, parse_dates=["datetime"])
+            if not existing.empty and _REQUIRED_COLUMNS.issubset(set(existing.columns)):
+                combined = pd.concat([existing, df], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["datetime"], keep="last")
+                combined = combined.sort_values("datetime").reset_index(drop=True)
+                df = combined
+        except Exception as exc:
+            logger.debug("合并缓存失败 %s: %s，覆盖写入", cache_path, exc)
+
+    # 最终校验：合并后数据必须非空
+    if df.empty:
+        return
+
+    df.to_csv(cache_path, index=False)
+    logger.debug("缓存已更新: %s (%d 条数据)", cache_path, len(df))

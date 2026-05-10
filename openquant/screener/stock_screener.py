@@ -340,8 +340,8 @@ class StockScreener:
             storage.close()
 
         # 信号检测：模拟执行订单并观察最后3天
-        buy_signal = False
-        sell_signal = False
+        # 只记录最后一个信号方向，避免同一轮中买卖信号同时为True
+        last_signal_direction = None  # "buy" or "sell"
         try:
             strategy = strategy_class()
             portfolio = Portfolio(initial_capital=self.initial_capital, cash=self.initial_capital)
@@ -395,24 +395,27 @@ class StockScreener:
                 if symbol in portfolio.positions:
                     portfolio.positions[symbol].current_price = close_price
 
-                # 只记录最后几天的信号
+                # 只记录最后几天的信号，以最后一个信号为准
                 if idx >= len(df) - recent_window:
                     for order in orders:
                         if order.side == OrderSide.BUY:
-                            buy_signal = True
+                            last_signal_direction = "buy"
                         elif order.side == OrderSide.SELL:
-                            sell_signal = True
+                            last_signal_direction = "sell"
         except Exception as exc:
             logger.debug("策略 %s 信号检测失败: %s", strategy_name, exc)
 
+        buy_signal = last_signal_direction == "buy"
+        sell_signal = last_signal_direction == "sell"
         return buy_signal, sell_signal, metrics
 
     def _calculate_probabilities(self, recommendation: StockRecommendation) -> None:
         """基于滚动验证结果计算买入/卖出概率
 
-        概率计算逻辑（修复版）：
-        - buy_consistency: 有信号策略中最高的信号比率（而非全体平均），更直觉
-        - 概率综合考虑: 最佳策略一致性(30%) + 有信号策略占比(25%) + 最新信号(20%) + 绩效(25%)
+        概率计算逻辑（v3 - 层级递进式）：
+        - 基础概率：根据"最新信号策略数"确定基础区间
+        - 加成概率：根据"信号一致性 + 绩效"在基础上递增
+        - 设计目标：3+策略在最新轮同时给出信号且绩效好时达到70%+
         """
         results = recommendation.strategy_results
         if not results:
@@ -421,26 +424,20 @@ class StockScreener:
         total = len(results)
 
         # === 买入概率计算 ===
-        # 有买入信号的策略（至少在1轮中出现过）
         active_buy_strategies = [r for r in results if r.buy_signal_ratio > 0]
         active_buy_count = len(active_buy_strategies)
-
-        # 1. 最佳策略一致性（有信号策略中信号比率最高的）
         best_buy_consistency = max((r.buy_signal_ratio for r in results), default=0.0)
-        # 展示用的 buy_consistency 取有信号策略的平均信号比率
+
         if active_buy_strategies:
             recommendation.buy_consistency = sum(r.buy_signal_ratio for r in active_buy_strategies) / len(active_buy_strategies)
         else:
             recommendation.buy_consistency = 0.0
 
-        # 2. 策略覆盖率：有多少策略在滚动验证中产生过买入信号
-        buy_coverage = active_buy_count / total if total > 0 else 0.0
-
-        # 3. 最新信号覆盖率
         latest_buy_count = sum(1 for r in results if r.latest_buy_signal)
         latest_buy_ratio = latest_buy_count / total
+        buy_coverage = active_buy_count / total if total > 0 else 0.0
 
-        # 4. 绩效指标（以有信号策略为主）
+        # 绩效指标
         if active_buy_strategies:
             avg_return = sum(r.avg_return for r in active_buy_strategies) / len(active_buy_strategies)
             avg_win_rate = sum(r.avg_win_rate for r in active_buy_strategies) / len(active_buy_strategies)
@@ -450,44 +447,52 @@ class StockScreener:
             avg_win_rate = sum(r.avg_win_rate for r in results) / total
             avg_sharpe = sum(r.avg_sharpe for r in results) / total
 
-        return_score = min(max((avg_return + 15) / 30, 0), 1.0)
-        win_rate_score = min(max(avg_win_rate / 100, 0), 1.0)
-        sharpe_score = min(max((avg_sharpe + 1) / 4, 0), 1.0)
+        return_score = min(max((avg_return + 10) / 25, 0), 1.0)
+        win_rate_score = min(max(avg_win_rate / 80, 0), 1.0)
+        sharpe_score = min(max((avg_sharpe + 0.5) / 3, 0), 1.0)
         performance_score = 0.4 * return_score + 0.35 * win_rate_score + 0.25 * sharpe_score
 
-        # 综合评分
-        buy_composite = (
-            0.30 * best_buy_consistency
-            + 0.25 * buy_coverage
-            + 0.20 * latest_buy_ratio
-            + 0.25 * performance_score
-        )
-        recommendation.composite_score = buy_composite
-
-        # 最终概率
-        if active_buy_count == 0 and latest_buy_count == 0:
-            recommendation.buy_probability = buy_composite * 10
+        # 层级递进概率计算
+        # 基础概率由"最新信号策略数"决定区间
+        if latest_buy_count >= 4:
+            base_probability = 55.0  # 4+策略最新给出买入信号
+        elif latest_buy_count >= 3:
+            base_probability = 45.0
+        elif latest_buy_count >= 2:
+            base_probability = 35.0
+        elif latest_buy_count >= 1:
+            base_probability = 25.0
+        elif active_buy_count >= 3:
+            base_probability = 15.0  # 历史有信号但最新没有
+        elif active_buy_count >= 1:
+            base_probability = 8.0
         else:
-            # 概率直接映射到 [0, 99]，用 composite × 放大系数
-            boost = min(1.0 + best_buy_consistency * 0.5 + buy_coverage * 0.3, 2.0)
-            recommendation.buy_probability = min(buy_composite * boost * 100, 99.0)
+            base_probability = 0.0
+
+        # 加成概率：一致性 + 覆盖率 + 绩效
+        consistency_bonus = best_buy_consistency * 20  # 最高一致性贡献最多20%
+        coverage_bonus = buy_coverage * 10  # 覆盖率贡献最多10%
+        performance_bonus = performance_score * 15  # 绩效贡献最多15%
+
+        buy_probability = base_probability + consistency_bonus + coverage_bonus + performance_bonus
+        recommendation.buy_probability = min(max(buy_probability, 0.0), 99.0)
+        recommendation.composite_score = buy_probability / 100.0
 
         # === 卖出概率计算 ===
         active_sell_strategies = [r for r in results if r.sell_signal_ratio > 0]
         active_sell_count = len(active_sell_strategies)
-
         best_sell_consistency = max((r.sell_signal_ratio for r in results), default=0.0)
+
         if active_sell_strategies:
             recommendation.sell_consistency = sum(r.sell_signal_ratio for r in active_sell_strategies) / len(active_sell_strategies)
         else:
             recommendation.sell_consistency = 0.0
 
-        sell_coverage = active_sell_count / total if total > 0 else 0.0
-
         latest_sell_count = sum(1 for r in results if r.latest_sell_signal)
         latest_sell_ratio = latest_sell_count / total
+        sell_coverage = active_sell_count / total if total > 0 else 0.0
 
-        # 卖出绩效：表现越差越该卖
+        # 卖出绩效：只有真正亏损时才给高分
         if active_sell_strategies:
             sell_avg_return = sum(r.avg_return for r in active_sell_strategies) / len(active_sell_strategies)
             sell_avg_drawdown = sum(r.avg_max_drawdown for r in active_sell_strategies) / len(active_sell_strategies)
@@ -497,23 +502,33 @@ class StockScreener:
             sell_avg_drawdown = sum(r.avg_max_drawdown for r in results) / total
             sell_avg_sharpe = sum(r.avg_sharpe for r in results) / total
 
-        loss_score = min(max((-sell_avg_return + 15) / 30, 0), 1.0)
-        drawdown_score = min(max(sell_avg_drawdown / 15, 0), 1.0)
-        sharpe_inv_score = min(max((1 - sell_avg_sharpe) / 4, 0), 1.0)
+        loss_score = min(max(-sell_avg_return / 15, 0), 1.0)
+        drawdown_score = min(max((sell_avg_drawdown - 3) / 12, 0), 1.0)
+        sharpe_inv_score = min(max(-sell_avg_sharpe / 2, 0), 1.0)
         sell_perf = 0.4 * loss_score + 0.35 * drawdown_score + 0.25 * sharpe_inv_score
 
-        sell_composite = (
-            0.30 * best_sell_consistency
-            + 0.25 * sell_coverage
-            + 0.20 * latest_sell_ratio
-            + 0.25 * sell_perf
-        )
-
-        if active_sell_count == 0 and latest_sell_count == 0:
-            recommendation.sell_probability = sell_composite * 10
+        # 卖出层级递进
+        if latest_sell_count >= 4:
+            sell_base = 55.0
+        elif latest_sell_count >= 3:
+            sell_base = 45.0
+        elif latest_sell_count >= 2:
+            sell_base = 35.0
+        elif latest_sell_count >= 1:
+            sell_base = 25.0
+        elif active_sell_count >= 3:
+            sell_base = 15.0
+        elif active_sell_count >= 1:
+            sell_base = 8.0
         else:
-            sell_boost = min(1.0 + best_sell_consistency * 0.5 + sell_coverage * 0.3, 2.0)
-            recommendation.sell_probability = min(sell_composite * sell_boost * 100, 99.0)
+            sell_base = 0.0
+
+        sell_consistency_bonus = best_sell_consistency * 20
+        sell_coverage_bonus = sell_coverage * 10
+        sell_perf_bonus = sell_perf * 15
+
+        sell_probability = sell_base + sell_consistency_bonus + sell_coverage_bonus + sell_perf_bonus
+        recommendation.sell_probability = min(max(sell_probability, 0.0), 99.0)
 
 
 def print_recommendations(recommendations: list[StockRecommendation]) -> None:
@@ -663,4 +678,360 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
     print("  💡 说明: 信号一致性 = 有信号策略在多轮滚动验证中重复给出相同信号的平均比率")
     print("     一致性越高表示信号越稳定可靠，非偶发性事件")
     print("  ⚠️ 免责声明: 以上分析仅供参考，不构成投资建议")
+    print("=" * 82 + "\n")
+
+
+class BacktestValidator:
+    """历史滚动回测验证器
+
+    性能优化版：先一次性预计算所有验证点的推荐概率，
+    然后对不同阈值组合复用同一份预计算结果（纯数值比较，无重复计算）。
+    """
+
+    def __init__(
+        self,
+        strategy_registry: dict,
+        datasource_name: str = "akshare",
+        initial_capital: float = 100000.0,
+        train_weeks: int = 20,
+        rolling_rounds: int = 15,
+    ):
+        self.strategy_registry = strategy_registry
+        self.datasource_name = datasource_name
+        self.initial_capital = initial_capital
+        self.train_weeks = train_weeks
+        self.rolling_rounds = rolling_rounds
+
+    def validate(
+        self,
+        stock_configs: list[tuple[MarketType, str, str]],
+        validation_weeks: int = 30,
+        buy_thresholds: list[float] | None = None,
+        sell_thresholds: list[float] | None = None,
+    ) -> dict:
+        """执行历史回测验证
+
+        优化：先预计算所有验证点的推荐概率，再对不同阈值复用结果。
+        """
+        if buy_thresholds is None:
+            buy_thresholds = [40.0, 50.0, 60.0, 70.0, 80.0]
+        if sell_thresholds is None:
+            sell_thresholds = [40.0, 50.0, 60.0, 70.0, 80.0]
+
+        from openquant.datasource.factory import DataSourceFactory
+        DataSourceFactory.register_defaults()
+
+        total_weeks = self.train_weeks + self.rolling_rounds + validation_weeks
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(weeks=total_weeks)).strftime("%Y-%m-%d")
+
+        logger.info(
+            "回测验证：数据区间 %s ~ %s（%d周），验证窗口=%d周",
+            start_date, end_date, total_weeks, validation_weeks,
+        )
+
+        stock_data = self._fetch_all_data(stock_configs, start_date, end_date)
+        if not stock_data:
+            logger.error("无法获取任何股票数据")
+            return {}
+
+        validation_points = self._generate_validation_points(stock_data, validation_weeks)
+        logger.info("生成了 %d 个验证时间点", len(validation_points))
+
+        # 核心优化：一次性预计算所有验证点的推荐概率
+        precomputed = self._precompute_all_recommendations(
+            stock_data, stock_configs, validation_points
+        )
+        logger.info("预计算完成，共 %d 个验证点 × %d 只股票", len(validation_points), len(stock_data))
+
+        # 对每个阈值组合进行模拟交易（纯数值计算，秒级完成）
+        results = {}
+        for buy_threshold in buy_thresholds:
+            for sell_threshold in sell_thresholds:
+                key = f"buy_{buy_threshold:.0f}_sell_{sell_threshold:.0f}"
+                result = self._simulate_with_precomputed(
+                    stock_data, precomputed, validation_points,
+                    buy_threshold, sell_threshold,
+                )
+                results[key] = result
+                logger.info(
+                    "阈值 买入>%.0f%% 卖出>%.0f%%: 收益=%.2f%%, 交易=%d次, 胜率=%.1f%%",
+                    buy_threshold, sell_threshold,
+                    result["total_return"], result["total_trades"], result["win_rate"],
+                )
+
+        return results
+
+    def _fetch_all_data(
+        self,
+        stock_configs: list[tuple[MarketType, str, str]],
+        start_date: str,
+        end_date: str,
+    ) -> dict[str, tuple[MarketType, str, pd.DataFrame]]:
+        """获取所有股票的历史数据"""
+        data_source = DataSourceFactory.get(self.datasource_name)
+        stock_data = {}
+
+        for market, symbol, display_name in stock_configs:
+            try:
+                logger.info("获取 %s (%s) 的历史数据...", display_name, symbol)
+                df = data_source.fetch_daily_bars(symbol, start_date, end_date, market)
+                if df is not None and not df.empty and len(df) >= 60:
+                    stock_data[display_name] = (market, symbol, df)
+                    logger.info("  → %d 条数据", len(df))
+                else:
+                    logger.warning("  → 数据不足，跳过 %s", display_name)
+                time.sleep(1.5)
+            except Exception as exc:
+                logger.error("获取 %s 数据失败: %s", display_name, exc)
+
+        return stock_data
+
+    def _generate_validation_points(
+        self, stock_data: dict, validation_weeks: int
+    ) -> list[int]:
+        """生成验证时间点索引"""
+        min_length = min(len(df) for _, _, df in stock_data.values())
+        points = []
+        for week_offset in range(validation_weeks, 0, -1):
+            idx = min_length - week_offset * 5
+            if idx > self.train_weeks * 5:
+                points.append(idx)
+        return points
+
+    def _precompute_all_recommendations(
+        self,
+        stock_data: dict[str, tuple[MarketType, str, pd.DataFrame]],
+        stock_configs: list[tuple[MarketType, str, str]],
+        validation_points: list[int],
+    ) -> dict[int, dict[str, tuple[float, float, float]]]:
+        """预计算所有验证点的推荐概率
+
+        Returns:
+            {point_idx: {display_name: (buy_prob, sell_prob, price)}}
+        """
+        strategies = {k: v for k, v in self.strategy_registry.items() if k != "event_ma_cross"}
+        precomputed: dict[int, dict[str, tuple[float, float, float]]] = {}
+
+        for point_idx in validation_points:
+            point_results: dict[str, tuple[float, float, float]] = {}
+
+            for market, symbol, display_name in stock_configs:
+                if display_name not in stock_data:
+                    continue
+                _, _, full_df = stock_data[display_name]
+                if point_idx > len(full_df):
+                    continue
+
+                df = full_df.iloc[:point_idx].reset_index(drop=True)
+                min_required = self.train_weeks * 4
+                if len(df) < min_required:
+                    continue
+
+                current_price = float(df.iloc[-1]["close"])
+
+                screener = StockScreener(
+                    strategy_registry=strategies,
+                    datasource_name=self.datasource_name,
+                    initial_capital=self.initial_capital,
+                    train_weeks=self.train_weeks,
+                    rolling_rounds=self.rolling_rounds,
+                )
+                rolling_slices = screener._generate_rolling_slices(df)
+                if len(rolling_slices) < 3:
+                    continue
+
+                strategy_results = []
+                for strategy_name, strategy_class in strategies.items():
+                    result = screener._run_strategy_rolling(
+                        strategy_name, strategy_class, symbol, rolling_slices, market
+                    )
+                    strategy_results.append(result)
+
+                recommendation = StockRecommendation(
+                    symbol=symbol,
+                    display_name=display_name,
+                    market=market,
+                    latest_close=current_price,
+                    total_strategies=len(strategy_results),
+                    rolling_rounds=len(rolling_slices),
+                    strategy_results=strategy_results,
+                )
+                screener._calculate_probabilities(recommendation)
+                point_results[display_name] = (
+                    recommendation.buy_probability,
+                    recommendation.sell_probability,
+                    current_price,
+                )
+
+            precomputed[point_idx] = point_results
+            logger.info("  验证点 %d/%d 完成", validation_points.index(point_idx) + 1, len(validation_points))
+
+        return precomputed
+
+    def _simulate_with_precomputed(
+        self,
+        stock_data: dict[str, tuple[MarketType, str, pd.DataFrame]],
+        precomputed: dict[int, dict[str, tuple[float, float, float]]],
+        validation_points: list[int],
+        buy_threshold: float,
+        sell_threshold: float,
+    ) -> dict:
+        """使用预计算结果模拟交易（纯数值计算）"""
+        capital = self.initial_capital
+        holdings: dict[str, dict] = {}
+        trade_log: list[dict] = []
+
+        for point_idx in validation_points:
+            point_results = precomputed.get(point_idx, {})
+
+            for display_name, (buy_prob, sell_prob, price) in point_results.items():
+                # 卖出逻辑
+                if sell_prob >= sell_threshold and display_name in holdings:
+                    holding = holdings[display_name]
+                    sell_value = holding["shares"] * price
+                    profit = sell_value - holding["shares"] * holding["avg_cost"]
+                    capital += sell_value
+                    trade_log.append({
+                        "action": "sell",
+                        "stock": display_name,
+                        "price": price,
+                        "shares": holding["shares"],
+                        "profit": profit,
+                        "point_idx": point_idx,
+                    })
+                    del holdings[display_name]
+
+                # 买入逻辑
+                elif buy_prob >= buy_threshold and display_name not in holdings:
+                    position_size = capital * 0.15
+                    if position_size > 1000 and capital > position_size:
+                        shares = int(position_size / price)
+                        if shares > 0:
+                            cost = shares * price
+                            capital -= cost
+                            holdings[display_name] = {
+                                "shares": shares,
+                                "avg_cost": price,
+                            }
+                            trade_log.append({
+                                "action": "buy",
+                                "stock": display_name,
+                                "price": price,
+                                "shares": shares,
+                                "profit": 0,
+                                "point_idx": point_idx,
+                            })
+
+        # 计算最终收益（平仓所有持仓）
+        final_equity = capital
+        for display_name, holding in holdings.items():
+            if display_name in stock_data:
+                _, _, df = stock_data[display_name]
+                final_price = float(df.iloc[-1]["close"])
+                final_equity += holding["shares"] * final_price
+
+        total_return = (final_equity - self.initial_capital) / self.initial_capital * 100
+        total_trades = len(trade_log)
+        winning_trades = sum(1 for t in trade_log if t["action"] == "sell" and t["profit"] > 0)
+        sell_trades = sum(1 for t in trade_log if t["action"] == "sell")
+        win_rate = (winning_trades / sell_trades * 100) if sell_trades > 0 else 0.0
+
+        return {
+            "total_return": total_return,
+            "final_equity": final_equity,
+            "total_trades": total_trades,
+            "sell_trades": sell_trades,
+            "winning_trades": winning_trades,
+            "win_rate": win_rate,
+            "buy_threshold": buy_threshold,
+            "sell_threshold": sell_threshold,
+            "trade_log": trade_log,
+        }
+
+
+def print_validation_results(results: dict) -> None:
+    """格式化输出回测验证结果"""
+    if not results:
+        print("  ⚠️ 无验证结果")
+        return
+
+    print("\n" + "=" * 82)
+    print("  📊 历史回测验证结果 - 概率阈值优化")
+    print(f"  验证时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print("=" * 82)
+
+    # 按收益率排序
+    sorted_results = sorted(results.items(), key=lambda x: x[1]["total_return"], reverse=True)
+
+    header = (
+        "  "
+        + _pad_to_width("买入阈值", 10)
+        + _pad_to_width("卖出阈值", 10)
+        + _pad_to_width("总收益率", 12)
+        + _pad_to_width("交易次数", 10)
+        + _pad_to_width("卖出次数", 10)
+        + _pad_to_width("胜率", 10)
+        + "评级"
+    )
+    print(f"\n{header}")
+    print("  " + "-" * 72)
+
+    for key, result in sorted_results:
+        buy_th = f"{result['buy_threshold']:.0f}%"
+        sell_th = f"{result['sell_threshold']:.0f}%"
+        total_return = result["total_return"]
+        total_trades = result["total_trades"]
+        sell_trades = result["sell_trades"]
+        win_rate = result["win_rate"]
+
+        if total_return > 10 and win_rate > 60:
+            rating = "⭐⭐⭐"
+        elif total_return > 5 and win_rate > 50:
+            rating = "⭐⭐"
+        elif total_return > 0:
+            rating = "⭐"
+        else:
+            rating = "❌"
+
+        row = (
+            "  "
+            + _pad_to_width(buy_th, 10)
+            + _pad_to_width(sell_th, 10)
+            + _pad_to_width(f"{total_return:>7.2f}%", 12)
+            + _pad_to_width(f"{total_trades:>5d}", 10)
+            + _pad_to_width(f"{sell_trades:>5d}", 10)
+            + _pad_to_width(f"{win_rate:>5.1f}%", 10)
+            + rating
+        )
+        print(row)
+
+    # 找出最优组合
+    if sorted_results:
+        best_key, best_result = sorted_results[0]
+        print(f"\n  🏆 最优阈值组合:")
+        print(f"     买入阈值: {best_result['buy_threshold']:.0f}%")
+        print(f"     卖出阈值: {best_result['sell_threshold']:.0f}%")
+        print(f"     总收益率: {best_result['total_return']:.2f}%")
+        print(f"     胜率: {best_result['win_rate']:.1f}%")
+        print(f"     交易次数: {best_result['total_trades']}")
+
+    # 找出70%+阈值的最优组合
+    high_threshold_results = [
+        (k, v) for k, v in sorted_results
+        if v["buy_threshold"] >= 70 or v["sell_threshold"] >= 70
+    ]
+    if high_threshold_results:
+        best_high = max(high_threshold_results, key=lambda x: x[1]["total_return"])
+        print(f"\n  📌 70%+高置信度最优组合:")
+        print(f"     买入阈值: {best_high[1]['buy_threshold']:.0f}%")
+        print(f"     卖出阈值: {best_high[1]['sell_threshold']:.0f}%")
+        print(f"     总收益率: {best_high[1]['total_return']:.2f}%")
+        print(f"     胜率: {best_high[1]['win_rate']:.1f}%")
+    else:
+        print("\n  ⚠️ 70%+阈值下无交易发生（信号太少）")
+
+    print("\n" + "=" * 82)
+    print("  💡 说明: 高阈值意味着更严格的信号筛选，交易次数更少但置信度更高")
+    print("  ⚠️ 免责声明: 历史表现不代表未来收益，以上分析仅供参考")
     print("=" * 82 + "\n")
