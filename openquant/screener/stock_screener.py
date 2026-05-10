@@ -839,12 +839,31 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
             elif best_result.latest_buy_signal and best_result.latest_sell_signal:
                 action = "冲突 ⚡"
             elif rec.backtest_return <= 0 and rec.trade_win_rate <= 0:
-                # 无正收益且无胜率 → 观望
                 action = "观望 👀"
             else:
                 action = "持有 ⏸️"
         else:
             action = "观望 👀"
+
+        # 未持仓视角：综合所有策略的最新信号判断入场时机
+        buy_signal_count = sum(1 for r in rec.strategy_results if r.latest_buy_signal)
+        sell_signal_count = sum(1 for r in rec.strategy_results if r.latest_sell_signal)
+
+        if best_result and best_result.latest_buy_signal:
+            fresh_action = "买入"
+        elif best_result and best_result.latest_sell_signal:
+            fresh_action = "观望"
+        elif buy_signal_count >= 2 and rec.expected_value > 0:
+            fresh_action = "买入"
+        elif buy_signal_count >= 1 and rec.expected_value > 0:
+            fresh_action = "关注"
+        elif sell_signal_count >= 2:
+            fresh_action = "观望"
+        elif rec.expected_value > 0 and sell_signal_count == 0:
+            fresh_action = "等待信号"
+        else:
+            fresh_action = "观望"
+        action = f"{action}（{fresh_action}）"
 
         rank_str = str(rank)
         strategy_str = best_name if best_name else "N/A"

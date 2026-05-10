@@ -92,10 +92,34 @@ def _draw_summary_page(pdf: PdfPages, recommendations: list, font_prop: FontProp
                 action = "买入"
             elif best_result.latest_sell_signal and not best_result.latest_buy_signal:
                 action = "卖出"
+            elif best_result.latest_buy_signal and best_result.latest_sell_signal:
+                action = "冲突"
+            elif rec.backtest_return <= 0 and rec.trade_win_rate <= 0:
+                action = "观望"
             else:
                 action = "持有"
         else:
-            action = "持有"
+            action = "观望"
+
+        # 未持仓视角：综合所有策略的最新信号判断入场时机
+        buy_signal_count = sum(1 for r in rec.strategy_results if r.latest_buy_signal)
+        sell_signal_count = sum(1 for r in rec.strategy_results if r.latest_sell_signal)
+
+        if best_result and best_result.latest_buy_signal:
+            fresh_action = "买入"
+        elif best_result and best_result.latest_sell_signal:
+            fresh_action = "观望"
+        elif buy_signal_count >= 2 and rec.expected_value > 0:
+            fresh_action = "买入"
+        elif buy_signal_count >= 1 and rec.expected_value > 0:
+            fresh_action = "关注"
+        elif sell_signal_count >= 2:
+            fresh_action = "观望"
+        elif rec.expected_value > 0 and sell_signal_count == 0:
+            fresh_action = "等待信号"
+        else:
+            fresh_action = "观望"
+        action = f"{action}（{fresh_action}）"
 
         pf_str = f"{rec.profit_factor:.2f}" if rec.profit_factor > 0 else "N/A"
         rows.append([
@@ -119,10 +143,12 @@ def _draw_summary_page(pdf: PdfPages, recommendations: list, font_prop: FontProp
             cell.set_text_props(fontproperties=font_prop)
             if col_idx == 9:
                 text = cell.get_text().get_text()
-                if text == "买入":
+                if text.startswith("买入"):
                     cell.set_facecolor("#E2EFDA")
-                elif text == "卖出":
+                elif text.startswith("卖出"):
                     cell.set_facecolor("#FCE4D6")
+                elif text.startswith("观望"):
+                    cell.set_facecolor("#FFF2CC")
             if row_idx % 2 == 0:
                 if cell.get_facecolor()[:3] == (1.0, 1.0, 1.0):
                     cell.set_facecolor("#F2F2F2")
