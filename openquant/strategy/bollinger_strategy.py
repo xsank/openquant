@@ -19,7 +19,7 @@ class BollingerBandStrategy(BaseStrategy):
         self,
         window: int = 20,
         num_std: float = 2.0,
-        position_ratio: float = 0.9,
+        position_ratio: float = 1.0,
         stop_loss_config: StopLossConfig | None = None,
     ):
         """
@@ -64,7 +64,8 @@ class BollingerBandStrategy(BaseStrategy):
         # 价格从下轨下方回到带内 → 买入信号
         if prev_close <= prev_lower and current_close > current_lower and not has_position:
             available_cash = portfolio.cash * self.position_ratio
-            quantity = self.calculate_max_buyable(bar.close, available_cash)
+            lot_size = self.get_lot_size(bar.market)
+            quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
             if quantity > 0:
                 orders.append(
                     self.create_buy_order(bar.symbol, bar.close, quantity, bar.market)

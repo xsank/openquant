@@ -24,7 +24,7 @@ class TurtleStrategy(BaseStrategy):
         exit_period: int = 10,
         atr_period: int = 20,
         risk_ratio: float = 0.02,
-        position_ratio: float = 0.9,
+        position_ratio: float = 1.0,
         stop_loss_config: StopLossConfig | None = None,
     ):
         """
@@ -81,17 +81,18 @@ class TurtleStrategy(BaseStrategy):
             if current_close > entry_high:
                 current_atr = atr(high_series, low_series, close_series, self.atr_period).iloc[-1]
                 available_cash = portfolio.cash * self.position_ratio
+                lot_size = self.get_lot_size(bar.market)
 
                 # 基于 ATR 的仓位计算：风险金额 / ATR = 股数
                 if current_atr > 0:
                     risk_amount = portfolio.total_equity * self.risk_ratio
                     atr_based_quantity = int(risk_amount / current_atr)
-                    max_quantity = self.calculate_max_buyable(bar.close, available_cash)
+                    max_quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
                     quantity = min(atr_based_quantity, max_quantity)
                     # 按手数取整
-                    quantity = (quantity // 100) * 100
+                    quantity = (quantity // lot_size) * lot_size
                 else:
-                    quantity = self.calculate_max_buyable(bar.close, available_cash)
+                    quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
 
                 if quantity > 0:
                     orders.append(

@@ -36,7 +36,8 @@ python -m openquant.main recommend \
   --train-weeks 20 \
   --rolling-rounds 15 \
   --datasource multi_source \
-  --capital 100000
+  --capital 500000 \
+  --position-ratio auto
 
 echo ""
 echo "分析完成！"

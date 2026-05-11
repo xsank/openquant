@@ -23,7 +23,7 @@ class VolumeBreakoutStrategy(BaseStrategy):
         ma_period: int = 20,
         volume_ma_period: int = 20,
         volume_multiplier: float = 1.5,
-        position_ratio: float = 0.9,
+        position_ratio: float = 1.0,
         stop_loss_config: StopLossConfig | None = None,
     ):
         """
@@ -77,7 +77,8 @@ class VolumeBreakoutStrategy(BaseStrategy):
 
         if price_breakout and volume_confirmed and not has_position:
             available_cash = portfolio.cash * self.position_ratio
-            quantity = self.calculate_max_buyable(bar.close, available_cash)
+            lot_size = self.get_lot_size(bar.market)
+            quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
             if quantity > 0:
                 orders.append(
                     self.create_buy_order(bar.symbol, bar.close, quantity, bar.market)

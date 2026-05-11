@@ -24,7 +24,7 @@ class KDJStrategy(BaseStrategy):
         slowd_period: int = 3,
         oversold: float = 20.0,
         overbought: float = 80.0,
-        position_ratio: float = 0.9,
+        position_ratio: float = 1.0,
         stop_loss_config: StopLossConfig | None = None,
     ):
         """
@@ -83,7 +83,8 @@ class KDJStrategy(BaseStrategy):
             and not has_position
         ):
             available_cash = portfolio.cash * self.position_ratio
-            quantity = self.calculate_max_buyable(bar.close, available_cash)
+            lot_size = self.get_lot_size(bar.market)
+            quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
             if quantity > 0:
                 orders.append(
                     self.create_buy_order(bar.symbol, bar.close, quantity, bar.market)

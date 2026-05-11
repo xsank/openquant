@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class MACrossStrategy(BaseStrategy):
     """双均线交叉策略"""
 
-    def __init__(self, short_window: int = 5, long_window: int = 20, position_ratio: float = 0.9, stop_loss_config: StopLossConfig | None = None):
+    def __init__(self, short_window: int = 5, long_window: int = 20, position_ratio: float = 1.0, stop_loss_config: StopLossConfig | None = None):
         """
         Args:
             short_window: 短期均线周期
@@ -59,13 +59,14 @@ class MACrossStrategy(BaseStrategy):
         # 金叉买入
         if prev_short <= prev_long and current_short > current_long and not has_position:
             available_cash = portfolio.cash * self.position_ratio
-            quantity = self.calculate_max_buyable(bar.close, available_cash)
+            lot_size = self.get_lot_size(bar.market)
+            quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
             if quantity > 0:
                 orders.append(self.create_buy_order(bar.symbol, bar.close, quantity, bar.market))
             else:
                 logger.warning(
                     "金叉信号触发但资金不足: %s 价格=%.2f, 可用资金=%.2f, 买入1手需=%.2f",
-                    bar.symbol, bar.close, available_cash, bar.close * 100,
+                    bar.symbol, bar.close, available_cash, bar.close * lot_size,
                 )
 
         # 死叉卖出

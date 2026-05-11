@@ -561,16 +561,24 @@ def run_recommend(args: argparse.Namespace) -> None:
     # 过滤掉需要事件数据的策略
     strategies = {k: v for k, v in _STRATEGY_REGISTRY.items() if k != "event_ma_cross"}
 
+    # 解析仓位比例：支持 "auto" 或浮点数
+    position_ratio_raw = args.position_ratio
+    if position_ratio_raw == "auto":
+        position_ratio = "auto"
+    else:
+        position_ratio = float(position_ratio_raw)
+
     screener = StockScreener(
         strategy_registry=strategies,
         datasource_name=args.datasource,
         initial_capital=args.capital,
         train_weeks=args.train_weeks,
         rolling_rounds=args.rolling_rounds,
+        position_ratio=position_ratio,
     )
 
     recommendations = screener.screen_stocks(stock_configs, end_date=args.end_date)
-    print_recommendations(recommendations)
+    print_recommendations(recommendations, position_mode=position_ratio_raw)
     generate_recommend_pdf(recommendations)
 
 
@@ -597,12 +605,17 @@ def run_validate(args: argparse.Namespace) -> None:
     # 过滤掉需要事件数据的策略
     strategies = {k: v for k, v in _STRATEGY_REGISTRY.items() if k != "event_ma_cross"}
 
+    # 解析仓位比例：支持 "auto" 或浮点数
+    position_ratio_raw = args.position_ratio
+    position_ratio = "auto" if position_ratio_raw == "auto" else float(position_ratio_raw)
+
     validator = BacktestValidator(
         strategy_registry=strategies,
         datasource_name=args.datasource,
         initial_capital=args.capital,
         train_weeks=args.train_weeks,
         rolling_rounds=args.rolling_rounds,
+        position_ratio=position_ratio,
     )
 
     buy_thresholds = [float(x) for x in args.buy_thresholds.split(",")]
@@ -682,7 +695,8 @@ def main() -> None:
     recommend_parser.add_argument("--rolling-rounds", type=int, default=15, help="滚动验证轮数（默认15轮）")
     recommend_parser.add_argument("--end-date", default=None, help="结束日期 (YYYY-MM-DD)，默认今天")
     recommend_parser.add_argument("--datasource", default="multi_source", help="数据源名称（默认multi_source，支持多源降级）")
-    recommend_parser.add_argument("--capital", type=float, default=100000, help="初始资金")
+    recommend_parser.add_argument("--capital", type=float, default=500000, help="初始资金（默认50万，确保小仓位也能交易）")
+    recommend_parser.add_argument("--position-ratio", default="auto", help="仓位比例: auto(根据EV动态调整) 或 0~1的浮点数（如0.2），默认auto")
 
     # 回测验证命令
     validate_parser = subparsers.add_parser("validate", help="历史回测验证（优化概率阈值）")
@@ -696,7 +710,8 @@ def main() -> None:
     validate_parser.add_argument("--buy-thresholds", default="40,50,60,70,80", help="买入阈值列表，逗号分隔（默认40,50,60,70,80）")
     validate_parser.add_argument("--sell-thresholds", default="40,50,60,70,80", help="卖出阈值列表，逗号分隔（默认40,50,60,70,80）")
     validate_parser.add_argument("--datasource", default="multi_source", help="数据源名称（默认multi_source，支持多源降级）")
-    validate_parser.add_argument("--capital", type=float, default=100000, help="初始资金")
+    validate_parser.add_argument("--capital", type=float, default=500000, help="初始资金（默认50万，确保小仓位也能交易）")
+    validate_parser.add_argument("--position-ratio", default="auto", help="仓位比例: auto(根据EV动态调整) 或 0~1的浮点数（如0.2），默认auto")
 
     # 参数优化命令
     optimize_parser = subparsers.add_parser("optimize", help="策略参数优化")

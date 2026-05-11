@@ -30,7 +30,7 @@ class EventEnhancedMACrossStrategy(BaseStrategy):
         self,
         short_window: int = 5,
         long_window: int = 20,
-        position_ratio: float = 0.9,
+        position_ratio: float = 1.0,
         event_lookback_days: int = 5,
         bearish_block_threshold: float = -0.5,
         bullish_boost_threshold: float = 0.5,
@@ -114,7 +114,8 @@ class EventEnhancedMACrossStrategy(BaseStrategy):
                     )
 
                 available_cash = portfolio.cash * effective_ratio
-                quantity = self.calculate_max_buyable(bar.close, available_cash)
+                lot_size = self.get_lot_size(bar.market)
+                quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
                 if quantity > 0:
                     orders.append(
                         self.create_buy_order(bar.symbol, bar.close, quantity, bar.market),

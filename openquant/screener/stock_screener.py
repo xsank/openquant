@@ -26,6 +26,38 @@ from openquant.storage.sqlite_storage import SqliteStorage
 
 logger = logging.getLogger(__name__)
 
+POSITION_RATIO_AUTO = "auto"
+
+
+def ev_to_position_ratio(expected_value: float) -> float:
+    """根据策略期望收益(EV%)动态计算仓位比例
+
+    映射分段:
+      EV <= 0     → 10%  (保底小仓位试探)
+      0  < EV ≤ 1 → 10% ~ 30%  (微弱正期望，小仓位)
+      1  < EV ≤ 3 → 30% ~ 60%  (中等期望，适中仓位)
+      3  < EV ≤ 5 → 60% ~ 80%  (较好期望，较大仓位)
+      5  < EV ≤ 8 → 80% ~ 100% (强期望，接近全仓)
+      EV > 8      → 100% (全仓)
+
+    Args:
+        expected_value: 策略期望收益率(%)
+
+    Returns:
+        仓位比例 (0.1 ~ 1.0)
+    """
+    if expected_value <= 0:
+        return 0.1
+    if expected_value <= 1:
+        return 0.1 + (expected_value / 1) * 0.2
+    if expected_value <= 3:
+        return 0.3 + ((expected_value - 1) / 2) * 0.3
+    if expected_value <= 5:
+        return 0.6 + ((expected_value - 3) / 2) * 0.2
+    if expected_value <= 8:
+        return 0.8 + ((expected_value - 5) / 3) * 0.2
+    return 1.0
+
 
 def _display_width(text: str) -> int:
     """计算字符串在终端中的显示宽度（中文占2格，emoji占2格）"""
@@ -103,6 +135,7 @@ class StockRecommendation:
     expected_value: float = 0.0        # 收益期望 (每笔交易的数学期望收益率 %)
     price_data: pd.DataFrame | None = None          # 全量价格数据（供绘图）
     best_strategy_trades: list[dict] = field(default_factory=list)  # 最优策略交易记录
+    position_ratio_used: float = 1.0   # 实际使用的仓位比例（auto 模式下由 EV 决定）
 
 
 class StockScreener:
@@ -115,6 +148,7 @@ class StockScreener:
         initial_capital: float = 100000.0,
         train_weeks: int = 20,
         rolling_rounds: int = 15,
+        position_ratio: float | str = 1.0,
     ):
         self.strategy_registry = strategy_registry
         self.datasource_name = datasource_name
@@ -122,6 +156,14 @@ class StockScreener:
         self.train_weeks = train_weeks
         self.rolling_rounds = rolling_rounds
         self.total_weeks_needed = train_weeks + rolling_rounds
+        self.is_auto_position = (position_ratio == POSITION_RATIO_AUTO)
+        self.position_ratio = 1.0 if self.is_auto_position else float(position_ratio)
+
+    def _resolve_position_ratio(self, expected_value: float) -> float:
+        """根据配置返回实际仓位比例：auto 模式基于 EV 动态计算，固定模式直接返回"""
+        if self.is_auto_position:
+            return ev_to_position_ratio(expected_value)
+        return self.position_ratio
 
     def screen_stocks(
         self,
@@ -249,9 +291,18 @@ class StockScreener:
             best_strategy.avg_trade_win_rate,
         )
 
+        # 根据最优策略 EV 计算实际仓位比例
+        actual_ratio = self._resolve_position_ratio(best_strategy.expected_value)
+        if self.is_auto_position:
+            logger.info(
+                "  %s auto仓位: EV=%.4f%% → position_ratio=%.0f%%",
+                display_name, best_strategy.expected_value, actual_ratio * 100,
+            )
+
         # 对最优策略做全量数据回测，收集交易记录供 PDF 绘图
         best_trades = self._run_best_strategy_full_backtest(
-            best_strategy.strategy_name, symbol, df, market
+            best_strategy.strategy_name, symbol, df, market,
+            position_ratio_override=actual_ratio,
         )
 
         recommendation = StockRecommendation(
@@ -265,6 +316,7 @@ class StockScreener:
             best_strategy_name=best_strategy.strategy_name,
             price_data=df,
             best_strategy_trades=best_trades,
+            position_ratio_used=actual_ratio,
         )
 
         self._calculate_probabilities(recommendation)
@@ -276,12 +328,14 @@ class StockScreener:
         symbol: str,
         df: pd.DataFrame,
         market: MarketType,
+        position_ratio_override: float | None = None,
     ) -> list[dict]:
         """对最优策略做全量数据回测，返回交易记录列表"""
         strategy_class = self.strategy_registry.get(strategy_name)
         if not strategy_class:
             return []
 
+        ratio = position_ratio_override if position_ratio_override is not None else self.position_ratio
         no_stop_profit = StopLossConfig(enabled=False)
         storage = SqliteStorage(":memory:")
         storage.initialize()
@@ -294,7 +348,7 @@ class StockScreener:
                 storage=storage,
                 stop_loss_config=no_stop_profit,
             )
-            engine.set_strategy(strategy_class())
+            engine.set_strategy(strategy_class(position_ratio=ratio))
             engine.add_data(symbol, df, market)
             engine.run()
 
@@ -542,8 +596,10 @@ class StockScreener:
         storage.initialize()
         metrics = {}
         round_trades: list[dict] = []
+        # 滚动验证阶段始终用 1.0 确保 EV 计算准确（auto 模式的核心设计）
+        rolling_ratio = 1.0 if self.is_auto_position else self.position_ratio
         try:
-            strategy = strategy_class()
+            strategy = strategy_class(position_ratio=rolling_ratio)
             engine = BacktestEngine(
                 initial_capital=self.initial_capital,
                 commission_rate=0.0003,
@@ -571,7 +627,7 @@ class StockScreener:
         # 只记录最后一个信号方向，避免同一轮中买卖信号同时为True
         last_signal_direction = None  # "buy" or "sell"
         try:
-            strategy = strategy_class()
+            strategy = strategy_class(position_ratio=rolling_ratio)
             portfolio = Portfolio(initial_capital=self.initial_capital, cash=self.initial_capital)
             strategy.initialize(portfolio)
 
@@ -779,7 +835,7 @@ class StockScreener:
             recommendation.expected_value = 0.0
 
 
-def print_recommendations(recommendations: list[StockRecommendation]) -> None:
+def print_recommendations(recommendations: list[StockRecommendation], position_mode: str = "auto") -> None:
     """格式化输出推荐结果（中文对齐版）"""
     print("\n" + "=" * 82)
     print("  📊 股票多策略综合分析 - 滚动验证版（Walk-Forward Analysis）")
@@ -787,6 +843,10 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
     if recommendations:
         rounds = recommendations[0].rolling_rounds
         print(f"  验证方式: {rounds}轮滚动窗口验证")
+    if position_mode == "auto":
+        print("  仓位模式: 🤖 auto（根据策略EV动态调整仓位比例）")
+    else:
+        print(f"  仓位模式: 固定 {float(position_mode) * 100:.0f}%")
     print("=" * 82)
 
     if not recommendations:
@@ -831,11 +891,13 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
         best_name = rec.best_strategy_name
         best_result = next((r for r in rec.strategy_results if r.strategy_name == best_name), None)
 
+        ratio_pct = f"{rec.position_ratio_used * 100:.0f}%" if position_mode == "auto" else ""
+
         if best_result:
             if best_result.latest_buy_signal and not best_result.latest_sell_signal:
-                action = "买入 📈"
+                action = f"买入 📈 {ratio_pct}" if ratio_pct else "买入 📈"
             elif best_result.latest_sell_signal and not best_result.latest_buy_signal:
-                action = "卖出 📉"
+                action = f"卖出 📉 {ratio_pct}" if ratio_pct else "卖出 📉"
             elif best_result.latest_buy_signal and best_result.latest_sell_signal:
                 action = "冲突 ⚡"
             elif rec.backtest_return <= 0 and rec.trade_win_rate <= 0:
@@ -850,11 +912,11 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
         sell_signal_count = sum(1 for r in rec.strategy_results if r.latest_sell_signal)
 
         if best_result and best_result.latest_buy_signal:
-            fresh_action = "买入"
+            fresh_action = f"买入{ratio_pct}" if ratio_pct else "买入"
         elif best_result and best_result.latest_sell_signal:
             fresh_action = "观望"
         elif buy_signal_count >= 2 and rec.expected_value > 0:
-            fresh_action = "买入"
+            fresh_action = f"买入{ratio_pct}" if ratio_pct else "买入"
         elif buy_signal_count >= 1 and rec.expected_value > 0:
             fresh_action = "关注"
         elif sell_signal_count >= 2:
@@ -903,11 +965,13 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
     print("-" * 82)
 
     for rec in recommendations:
+        ratio_info = f" | 仓位={rec.position_ratio_used * 100:.0f}%" if position_mode == "auto" else ""
         print(
             f"\n  【{rec.display_name}】({rec.symbol})"
             f" - 最优策略: {rec.best_strategy_name}"
             f" | EV={rec.expected_value:+.3f}%"
             f" | 滚动{rec.rolling_rounds}轮验证"
+            f"{ratio_info}"
         )
 
         sorted_results = sorted(rec.strategy_results, key=lambda r: r.expected_value, reverse=True)
@@ -915,9 +979,11 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
             is_best = "⭐" if sr.strategy_name == rec.best_strategy_name else "  "
             signal_str = ""
             if sr.latest_buy_signal:
-                signal_str = " 📈买入"
+                ratio_tag = f"({rec.position_ratio_used * 100:.0f}%仓)" if position_mode == "auto" else ""
+                signal_str = f" 📈买入{ratio_tag}"
             elif sr.latest_sell_signal:
-                signal_str = " 📉卖出"
+                ratio_tag = f"({rec.position_ratio_used * 100:.0f}%仓)" if position_mode == "auto" else ""
+                signal_str = f" 📉卖出{ratio_tag}"
             print(
                 f"    {is_best} {sr.strategy_name:<16s}"
                 f" EV={sr.expected_value:+7.3f}%"
@@ -957,9 +1023,11 @@ def _save_strategy_detail_md(recommendations: list[StockRecommendation]) -> None
         lines.append(f"验证方式: {rounds}轮滚动窗口验证\n")
 
     for rec in recommendations:
+        ratio_label = f" | 仓位={rec.position_ratio_used * 100:.0f}%" if rec.position_ratio_used < 1.0 else ""
         lines.append(f"\n## 【{rec.display_name}】({rec.symbol})")
         lines.append(f"- **最优策略**: {rec.best_strategy_name}")
         lines.append(f"- **期望收益(EV)**: {rec.expected_value:+.3f}%")
+        lines.append(f"- **仓位比例**: {rec.position_ratio_used * 100:.0f}%")
         lines.append(f"- **最新价**: {rec.latest_close:.2f}\n")
         lines.append("| 策略 | EV | 胜率 | 总收益 | 盈亏比 | 信号 |")
         lines.append("|---|---|---|---|---|---|")
@@ -973,9 +1041,9 @@ def _save_strategy_detail_md(recommendations: list[StockRecommendation]) -> None
             best_mark = "⭐" if sr.strategy_name == rec.best_strategy_name else ""
             signal = ""
             if sr.latest_buy_signal:
-                signal = "📈买入"
+                signal = f"📈买入({rec.position_ratio_used * 100:.0f}%仓)"
             elif sr.latest_sell_signal:
-                signal = "📉卖出"
+                signal = f"📉卖出({rec.position_ratio_used * 100:.0f}%仓)"
             lines.append(
                 f"| {best_mark}{sr.strategy_name} "
                 f"| {sr.expected_value:+7.3f}% "
@@ -1008,12 +1076,14 @@ class BacktestValidator:
         initial_capital: float = 100000.0,
         train_weeks: int = 20,
         rolling_rounds: int = 15,
+        position_ratio: float | str = 1.0,
     ):
         self.strategy_registry = strategy_registry
         self.datasource_name = datasource_name
         self.initial_capital = initial_capital
         self.train_weeks = train_weeks
         self.rolling_rounds = rolling_rounds
+        self.position_ratio = position_ratio
 
     def validate(
         self,
@@ -1149,6 +1219,7 @@ class BacktestValidator:
                     initial_capital=self.initial_capital,
                     train_weeks=self.train_weeks,
                     rolling_rounds=self.rolling_rounds,
+                    position_ratio=self.position_ratio,
                 )
                 rolling_slices = screener._generate_rolling_slices(df)
                 if len(rolling_slices) < 3:

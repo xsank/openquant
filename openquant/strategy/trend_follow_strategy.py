@@ -22,7 +22,7 @@ class TrendFollowStrategy(BaseStrategy):
         self,
         short_ema_period: int = 10,
         long_ema_period: int = 50,
-        position_ratio: float = 0.9,
+        position_ratio: float = 1.0,
         stop_loss_config: StopLossConfig | None = None,
     ):
         """
@@ -67,7 +67,8 @@ class TrendFollowStrategy(BaseStrategy):
 
         if crossover and price_above_trend and not has_position:
             available_cash = portfolio.cash * self.position_ratio
-            quantity = self.calculate_max_buyable(bar.close, available_cash)
+            lot_size = self.get_lot_size(bar.market)
+            quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
             if quantity > 0:
                 orders.append(
                     self.create_buy_order(bar.symbol, bar.close, quantity, bar.market)

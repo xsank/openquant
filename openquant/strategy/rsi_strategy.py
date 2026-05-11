@@ -19,7 +19,7 @@ class RSIReversalStrategy(BaseStrategy):
         rsi_period: int = 14,
         oversold: float = 30.0,
         overbought: float = 70.0,
-        position_ratio: float = 0.9,
+        position_ratio: float = 1.0,
         stop_loss_config: StopLossConfig | None = None,
     ):
         """
@@ -59,7 +59,8 @@ class RSIReversalStrategy(BaseStrategy):
         # RSI 从超卖区回升（前一根在超卖区，当前根突破超卖线）→ 买入
         if prev_rsi <= self.oversold < current_rsi and not has_position:
             available_cash = portfolio.cash * self.position_ratio
-            quantity = self.calculate_max_buyable(bar.close, available_cash)
+            lot_size = self.get_lot_size(bar.market)
+            quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
             if quantity > 0:
                 orders.append(
                     self.create_buy_order(bar.symbol, bar.close, quantity, bar.market)

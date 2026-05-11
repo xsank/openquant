@@ -18,7 +18,7 @@ class MACDStrategy(BaseStrategy):
         fast_period: int = 12,
         slow_period: int = 26,
         signal_period: int = 9,
-        position_ratio: float = 0.9,
+        position_ratio: float = 1.0,
         stop_loss_config: StopLossConfig | None = None,
     ):
         super().__init__(stop_loss_config=stop_loss_config)
@@ -49,7 +49,8 @@ class MACDStrategy(BaseStrategy):
         # MACD 柱状图由负转正（金叉）买入
         if prev_hist <= 0 < current_hist and not has_position:
             available_cash = portfolio.cash * self.position_ratio
-            quantity = self.calculate_max_buyable(bar.close, available_cash)
+            lot_size = self.get_lot_size(bar.market)
+            quantity = self.calculate_max_buyable(bar.close, available_cash, lot_size)
             if quantity > 0:
                 orders.append(self.create_buy_order(bar.symbol, bar.close, quantity, bar.market))
 

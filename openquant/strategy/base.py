@@ -111,11 +111,30 @@ class BaseStrategy(StrategyInterface):
             market=market,
         )
 
-    def calculate_max_buyable(self, price: float, cash: float, lot_size: int = 100) -> int:
-        """计算最大可买数量（按手数取整）"""
+    @staticmethod
+    def get_lot_size(market: MarketType | None = None) -> int:
+        """根据市场类型返回最小交易单位"""
+        if market == MarketType.US_STOCK:
+            return 1
+        return 100
+
+    def calculate_max_buyable(
+        self, price: float, cash: float, lot_size: int = 100,
+        slippage_rate: float = 0.001, commission_rate: float = 0.0003,
+    ) -> int:
+        """计算最大可买数量（按手数取整，预留滑点+佣金空间）
+
+        Args:
+            price: 当前价格
+            cash: 可用资金
+            lot_size: 最小交易单位
+            slippage_rate: 滑点率（默认 0.1%）
+            commission_rate: 佣金率（默认 0.03%）
+        """
         if price <= 0:
             return 0
-        max_shares = int(cash / price)
+        effective_price = price * (1 + slippage_rate) * (1 + commission_rate)
+        max_shares = int(cash / effective_price)
         return (max_shares // lot_size) * lot_size
 
     def load_events(self, symbol: str, events: list[EventFactor]) -> None:
