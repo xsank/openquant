@@ -38,6 +38,199 @@ CJK_FONT_PATH = "/usr/share/fonts/google-droid/DroidSansFallback.ttf"
 _STRATEGIES_WITH_SUB_PLOT = {"macd", "rsi_reversal", "kdj", "volume_breakout"}
 
 
+def _generate_signal_reason(rec, df: pd.DataFrame) -> tuple[str, str]:
+    """根据最优策略和最新数据生成当前建议及原因说明
+
+    建议仅以最优策略信号为准（与回测一致）：
+    - 最优策略有买入信号 → 买入
+    - 最优策略有卖出信号 → 卖出
+    - 最优策略无信号 → 观望
+    其他策略不一致的信号仅作为辅助参考在文字中说明。
+
+    Returns:
+        (action, reason): 建议动作和原因文字
+    """
+    strategy = rec.best_strategy_name
+    best_result = next((r for r in rec.strategy_results if r.strategy_name == strategy), None)
+    if best_result is None:
+        return "观望", ""
+
+    has_buy = best_result.latest_buy_signal
+    has_sell = best_result.latest_sell_signal
+
+    # 建议仅以最优策略为准
+    if has_buy and not has_sell:
+        action = "买入"
+    elif has_sell and not has_buy:
+        action = "卖出"
+    elif has_buy and has_sell:
+        action = "冲突"
+    else:
+        action = "观望"
+
+    # 收集其他策略的辅助信号
+    buy_strategies = [r.strategy_name for r in rec.strategy_results
+                      if r.latest_buy_signal and r.strategy_name != strategy]
+    sell_strategies = [r.strategy_name for r in rec.strategy_results
+                       if r.latest_sell_signal and r.strategy_name != strategy]
+
+    close_series = pd.Series(df["close"].values, index=range(len(df)))
+    high_series = pd.Series(df["high"].values, index=range(len(df)))
+    low_series = pd.Series(df["low"].values, index=range(len(df)))
+    volume_series = pd.Series(df["volume"].values, index=range(len(df)))
+    current_close = close_series.iloc[-1]
+    prev_close = close_series.iloc[-2] if len(close_series) > 1 else current_close
+
+    reason = ""
+
+    if strategy == "volume_breakout":
+        price_ma = moving_average(close_series, 20)
+        vol_ma = moving_average(volume_series, 20)
+        cur_vol = volume_series.iloc[-1]
+        cur_vol_ma = vol_ma.iloc[-1] if not np.isnan(vol_ma.iloc[-1]) else 1
+        vol_ratio = cur_vol / cur_vol_ma if cur_vol_ma > 0 else 0
+        cur_price_ma = price_ma.iloc[-1]
+        if has_buy:
+            reason = (f"价格{current_close:.2f}突破MA(20)={cur_price_ma:.2f}，"
+                      f"成交量为均量的{vol_ratio:.1f}倍(阈值1.5倍)")
+        elif has_sell:
+            reason = f"价格{current_close:.2f}跌破MA(20)={cur_price_ma:.2f}，趋势转弱"
+        else:
+            reason = f"价格{current_close:.2f} vs MA(20)={cur_price_ma:.2f}，成交量{vol_ratio:.1f}倍均量，等待突破确认"
+
+    elif strategy == "bollinger_band":
+        upper, middle, lower = bollinger_bands(close_series, 20, 2.0)
+        cur_upper = upper.iloc[-1]
+        cur_lower = lower.iloc[-1]
+        cur_middle = middle.iloc[-1]
+        prev_lower_val = lower.iloc[-2] if len(lower) > 1 else cur_lower
+        prev_upper_val = upper.iloc[-2] if len(upper) > 1 else cur_upper
+        if has_buy:
+            reason = (f"价格从下轨({prev_lower_val:.2f})下方回到带内，"
+                      f"当前{current_close:.2f}，BOLL({cur_lower:.2f}/{cur_middle:.2f}/{cur_upper:.2f})，超跌反弹信号")
+        elif has_sell:
+            reason = (f"价格从上轨({prev_upper_val:.2f})上方回到带内，"
+                      f"当前{current_close:.2f}，BOLL({cur_lower:.2f}/{cur_middle:.2f}/{cur_upper:.2f})，超涨回落信号")
+        else:
+            reason = f"当前{current_close:.2f}，BOLL({cur_lower:.2f}/{cur_middle:.2f}/{cur_upper:.2f})，处于带内等待信号"
+
+    elif strategy == "ma_cross":
+        ma_short = moving_average(close_series, 5)
+        ma_long = moving_average(close_series, 20)
+        cur_ma5 = ma_short.iloc[-1]
+        cur_ma20 = ma_long.iloc[-1]
+        if has_buy:
+            reason = f"MA(5)={cur_ma5:.2f}上穿MA(20)={cur_ma20:.2f}，金叉买入信号"
+        elif has_sell:
+            reason = f"MA(5)={cur_ma5:.2f}下穿MA(20)={cur_ma20:.2f}，死叉卖出信号"
+        else:
+            reason = f"MA(5)={cur_ma5:.2f} vs MA(20)={cur_ma20:.2f}，等待交叉信号"
+
+    elif strategy == "macd":
+        dif, dea, _ = macd(close_series, 12, 26, 9)
+        cur_dif = dif.iloc[-1]
+        cur_dea = dea.iloc[-1]
+        if has_buy:
+            reason = f"DIF={cur_dif:.3f}上穿DEA={cur_dea:.3f}，MACD金叉买入"
+        elif has_sell:
+            reason = f"DIF={cur_dif:.3f}下穿DEA={cur_dea:.3f}，MACD死叉卖出"
+        else:
+            reason = f"DIF={cur_dif:.3f} vs DEA={cur_dea:.3f}，等待交叉"
+
+    elif strategy == "rsi_reversal":
+        rsi_values = rsi(close_series, 14)
+        cur_rsi = rsi_values.iloc[-1]
+        if has_buy:
+            reason = f"RSI(14)={cur_rsi:.1f}，从超卖区(<30)回升，反弹买入"
+        elif has_sell:
+            reason = f"RSI(14)={cur_rsi:.1f}，从超买区(>70)回落，获利卖出"
+        else:
+            reason = f"RSI(14)={cur_rsi:.1f}，处于中性区间，等待信号"
+
+    elif strategy == "kdj":
+        k_val, d_val, j_val = kdj(high_series, low_series, close_series, 9, 3, 3)
+        cur_k = k_val.iloc[-1]
+        cur_d = d_val.iloc[-1]
+        if has_buy:
+            reason = f"K={cur_k:.1f}上穿D={cur_d:.1f}(超卖区)，KDJ金叉买入"
+        elif has_sell:
+            reason = f"K={cur_k:.1f}下穿D={cur_d:.1f}(超买区)，KDJ死叉卖出"
+        else:
+            reason = f"K={cur_k:.1f}, D={cur_d:.1f}，等待交叉信号"
+
+    elif strategy == "dual_momentum":
+        ma_short = moving_average(close_series, 10)
+        ma_long = moving_average(close_series, 30)
+        cur_ma10 = ma_short.iloc[-1]
+        cur_ma30 = ma_long.iloc[-1]
+        if has_buy:
+            reason = f"MA(10)={cur_ma10:.2f}上穿MA(30)={cur_ma30:.2f}+动量确认，双动量买入"
+        elif has_sell:
+            reason = f"MA(10)={cur_ma10:.2f}下穿MA(30)={cur_ma30:.2f}，动量衰减卖出"
+        else:
+            reason = f"MA(10)={cur_ma10:.2f} vs MA(30)={cur_ma30:.2f}，等待动量确认"
+
+    elif strategy == "trend_follow":
+        ema_short = exponential_moving_average(close_series, 10)
+        ema_long = exponential_moving_average(close_series, 50)
+        cur_ema10 = ema_short.iloc[-1]
+        cur_ema50 = ema_long.iloc[-1]
+        if has_buy:
+            reason = f"EMA(10)={cur_ema10:.2f}上穿EMA(50)={cur_ema50:.2f}，趋势确认买入"
+        elif has_sell:
+            reason = f"EMA(10)={cur_ema10:.2f}下穿EMA(50)={cur_ema50:.2f}，趋势反转卖出"
+        else:
+            reason = f"EMA(10)={cur_ema10:.2f} vs EMA(50)={cur_ema50:.2f}，等待趋势确认"
+
+    elif strategy == "turtle":
+        upper_ch, _, _ = donchian_channel(high_series, low_series, 20)
+        _, _, lower_ch = donchian_channel(high_series, low_series, 10)
+        cur_upper_ch = upper_ch.iloc[-1]
+        cur_lower_ch = lower_ch.iloc[-1]
+        if has_buy:
+            reason = f"价格{current_close:.2f}突破20日高点{cur_upper_ch:.2f}，海龟入场"
+        elif has_sell:
+            reason = f"价格{current_close:.2f}跌破10日低点{cur_lower_ch:.2f}，海龟离场"
+        else:
+            reason = f"价格{current_close:.2f}，20日高点{cur_upper_ch:.2f}/10日低点{cur_lower_ch:.2f}，等待突破"
+
+    elif strategy == "event_enhanced_ma":
+        ma_short = moving_average(close_series, 5)
+        ma_long = moving_average(close_series, 20)
+        cur_ma5 = ma_short.iloc[-1]
+        cur_ma20 = ma_long.iloc[-1]
+        if has_buy:
+            reason = f"MA(5)={cur_ma5:.2f}上穿MA(20)={cur_ma20:.2f}+事件增强，买入"
+        elif has_sell:
+            reason = f"MA(5)={cur_ma5:.2f}下穿MA(20)={cur_ma20:.2f}，卖出"
+        else:
+            reason = f"MA(5)={cur_ma5:.2f} vs MA(20)={cur_ma20:.2f}，等待信号"
+
+    else:
+        if has_buy:
+            reason = f"策略{strategy}发出买入信号，价格{current_close:.2f}"
+        elif has_sell:
+            reason = f"策略{strategy}发出卖出信号，价格{current_close:.2f}"
+        else:
+            reason = f"策略{strategy}当前无明确信号，价格{current_close:.2f}"
+
+    # 附加仓位信息
+    pos_pct = int(rec.position_ratio_used * 100)
+    if action in ("买入", "卖出"):
+        reason += f"  |  建议仓位: {pos_pct}%"
+
+    # 其他策略的辅助参考信息（与最优策略信号不一致时补充说明）
+    aux_parts = []
+    if buy_strategies:
+        aux_parts.append(f"另有{len(buy_strategies)}个策略建议买入({', '.join(buy_strategies[:3])})")
+    if sell_strategies:
+        aux_parts.append(f"另有{len(sell_strategies)}个策略建议卖出({', '.join(sell_strategies[:3])})")
+    if aux_parts:
+        reason += "  [辅助参考: " + "; ".join(aux_parts) + "]"
+
+    return action, reason
+
+
 def _get_font() -> FontProperties:
     if os.path.exists(CJK_FONT_PATH):
         return FontProperties(fname=CJK_FONT_PATH)
@@ -87,6 +280,8 @@ def _draw_summary_page(pdf: PdfPages, recommendations: list, font_prop: FontProp
     rows = []
     for rank, rec in enumerate(recommendations, 1):
         best_result = next((r for r in rec.strategy_results if r.strategy_name == rec.best_strategy_name), None)
+
+        # 建议仅以最优策略信号为准（与回测一致）
         if best_result:
             if best_result.latest_buy_signal and not best_result.latest_sell_signal:
                 action = "买入"
@@ -94,39 +289,36 @@ def _draw_summary_page(pdf: PdfPages, recommendations: list, font_prop: FontProp
                 action = "卖出"
             elif best_result.latest_buy_signal and best_result.latest_sell_signal:
                 action = "冲突"
-            elif rec.backtest_return <= 0 and rec.trade_win_rate <= 0:
-                action = "观望"
             else:
-                action = "持有"
+                action = "观望"
         else:
             action = "观望"
 
-        # 未持仓视角：综合所有策略的最新信号判断入场时机
-        buy_signal_count = sum(1 for r in rec.strategy_results if r.latest_buy_signal)
-        sell_signal_count = sum(1 for r in rec.strategy_results if r.latest_sell_signal)
+        # 其他策略辅助参考（不改变主建议，仅标注）
+        other_buy_count = sum(1 for r in rec.strategy_results
+                             if r.latest_buy_signal and r.strategy_name != rec.best_strategy_name)
+        other_sell_count = sum(1 for r in rec.strategy_results
+                              if r.latest_sell_signal and r.strategy_name != rec.best_strategy_name)
 
-        if best_result and best_result.latest_buy_signal:
-            fresh_action = "买入"
-        elif best_result and best_result.latest_sell_signal:
-            fresh_action = "观望"
-        elif buy_signal_count >= 2 and rec.expected_value > 0:
-            fresh_action = "买入"
-        elif buy_signal_count >= 1 and rec.expected_value > 0:
-            fresh_action = "关注"
-        elif sell_signal_count >= 2:
-            fresh_action = "观望"
-        elif rec.expected_value > 0 and sell_signal_count == 0:
-            fresh_action = "等待信号"
+        if other_buy_count > 0:
+            aux_tag = f"+{other_buy_count}买"
+        elif other_sell_count > 0:
+            aux_tag = f"+{other_sell_count}卖"
         else:
-            fresh_action = "观望"
-        action = f"{action}（{fresh_action}）"
+            aux_tag = ""
+
+        # 附加仓位比例
+        pos_pct = int(rec.position_ratio_used * 100)
+        action_display = f"{action} {pos_pct}%仓"
+        if aux_tag:
+            action_display += f" {aux_tag}"
 
         pf_str = f"{rec.profit_factor:.2f}" if rec.profit_factor > 0 else "N/A"
         rows.append([
             str(rank), rec.display_name, rec.best_strategy_name,
             f"{rec.trade_win_rate:.1f}%", pf_str,
             f"{rec.expected_value:+.3f}%", f"{rec.backtest_return:+.2f}%",
-            f"{rec.avg_holding_days:.1f}", f"{rec.latest_close:.2f}", action,
+            f"{rec.avg_holding_days:.1f}", f"{rec.latest_close:.2f}", action_display,
         ])
 
     table = ax.table(cellText=rows, colLabels=columns, cellLoc="center", loc="center",
@@ -160,7 +352,7 @@ def _draw_summary_page(pdf: PdfPages, recommendations: list, font_prop: FontProp
 
 
 def _draw_stock_chart(pdf: PdfPages, rec, font_prop: FontProperties) -> None:
-    """绘制单只股票的股价时序图 + B/S 操作标记 + 策略辅助线"""
+    """绘制单只股票的股价时序图 + B/S 操作标记 + 策略辅助线 + 当前建议标注"""
     df = rec.price_data
     trades = rec.best_strategy_trades
     strategy = rec.best_strategy_name
@@ -169,13 +361,16 @@ def _draw_stock_chart(pdf: PdfPages, rec, font_prop: FontProperties) -> None:
     close_series = pd.Series(df["close"].values, index=range(len(df)))
     closes = df["close"].values
 
+    # 生成当前建议和原因
+    signal_action, signal_reason = _generate_signal_reason(rec, df)
+
     needs_sub = strategy in _STRATEGIES_WITH_SUB_PLOT
     if needs_sub:
         fig, (ax_price, ax_sub) = plt.subplots(
-            2, 1, figsize=(14, 8), height_ratios=[3, 1], sharex=True,
+            2, 1, figsize=(14, 9), height_ratios=[3, 1], sharex=True,
         )
     else:
-        fig, ax_price = plt.subplots(figsize=(14, 6))
+        fig, ax_price = plt.subplots(figsize=(14, 7))
         ax_sub = None
 
     # --- 主图：价格 ---
@@ -188,9 +383,36 @@ def _draw_stock_chart(pdf: PdfPages, rec, font_prop: FontProperties) -> None:
     # --- B/S 标记 ---
     _draw_trade_markers(ax_price, trades)
 
-    # --- 标题和指标信息 ---
+    # --- 在最新价格处标注当前建议 ---
+    latest_date = dates.iloc[-1]
+    latest_close = closes[-1]
+    if signal_action == "买入":
+        marker_color = "#2E7D32"
+        marker_symbol = "★买入"
+    elif signal_action == "卖出":
+        marker_color = "#C62828"
+        marker_symbol = "★卖出"
+    else:
+        marker_color = "#FF8C00"
+        marker_symbol = f"★{signal_action}"
+
+    ax_price.annotate(
+        marker_symbol,
+        xy=(latest_date, latest_close),
+        xytext=(15, 20),
+        textcoords="offset points",
+        fontsize=12,
+        fontweight="bold",
+        color=marker_color,
+        fontproperties=font_prop,
+        arrowprops=dict(arrowstyle="->", color=marker_color, lw=1.5),
+        zorder=10,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor=marker_color, alpha=0.9),
+    )
+
+    # --- 标题和指标信息（使用 fig.suptitle + fig.text 避免重叠） ---
     title_text = f"{rec.display_name} ({rec.symbol}) - 最优策略: {rec.best_strategy_name}"
-    ax_price.set_title(title_text, fontproperties=font_prop, fontsize=14, fontweight="bold", pad=12)
+    fig.suptitle(title_text, fontproperties=font_prop, fontsize=14, fontweight="bold", y=0.98)
 
     info_text = (
         f"EV={rec.expected_value:+.3f}%  "
@@ -199,8 +421,8 @@ def _draw_stock_chart(pdf: PdfPages, rec, font_prop: FontProperties) -> None:
         f"总收益={rec.backtest_return:+.2f}%  "
         f"持仓={rec.avg_holding_days:.1f}天"
     )
-    ax_price.text(0.5, 1.02, info_text, transform=ax_price.transAxes, fontsize=9,
-                  fontproperties=font_prop, ha="center", va="bottom", color="gray")
+    fig.text(0.5, 0.94, info_text, ha="center", va="top", fontsize=9,
+             fontproperties=font_prop, color="gray")
 
     ax_price.set_ylabel("价格", fontproperties=font_prop, fontsize=10)
     ax_price.legend(loc="upper left", prop=font_prop, fontsize=8, ncol=2)
@@ -209,8 +431,18 @@ def _draw_stock_chart(pdf: PdfPages, rec, font_prop: FontProperties) -> None:
     bottom_ax = ax_sub if ax_sub is not None else ax_price
     bottom_ax.set_xlabel("日期", fontproperties=font_prop, fontsize=10)
 
+    # --- 底部建议原因说明文字 ---
+    if signal_reason:
+        reason_label = f"[当前建议: {signal_action}]  原因: {signal_reason}"
+        fig.text(
+            0.5, 0.01, reason_label,
+            ha="center", va="bottom", fontsize=9,
+            fontproperties=font_prop, color="#333333",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="#F5F5F5", edgecolor="#CCCCCC", alpha=0.95),
+        )
+
     fig.autofmt_xdate()
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.04, 1, 0.92])
     pdf.savefig(fig, dpi=150)
     plt.close(fig)
 
