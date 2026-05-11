@@ -897,12 +897,12 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
         )
         print(row)
 
-    # 详细分析：各股票的策略对比
+    # 详细分析：各股票的策略对比（完整输出所有股票）
     print("\n" + "-" * 82)
     print("  📋 各股票策略穷举对比（按期望收益排序）")
     print("-" * 82)
 
-    for rec in recommendations[:5]:
+    for rec in recommendations:
         print(
             f"\n  【{rec.display_name}】({rec.symbol})"
             f" - 最优策略: {rec.best_strategy_name}"
@@ -933,6 +933,65 @@ def print_recommendations(recommendations: list[StockRecommendation]) -> None:
     print("     排名按最优策略的期望收益排序，建议基于最优策略最新信号")
     print("  ⚠️ 免责声明: 以上分析仅供参考，不构成投资建议")
     print("=" * 82 + "\n")
+
+    # 保存策略穷举对比到 Markdown 文件
+    _save_strategy_detail_md(recommendations)
+
+
+def _save_strategy_detail_md(recommendations: list[StockRecommendation]) -> None:
+    """将策略穷举对比结果保存为 Markdown 文件到 output/md 目录"""
+    from pathlib import Path
+
+    output_dir = Path("output/md")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    filepath = output_dir / f"strategy_detail_{timestamp}.md"
+
+    lines: list[str] = []
+    lines.append("# 📋 各股票策略穷举对比（按期望收益排序）\n")
+    lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+
+    if recommendations:
+        rounds = recommendations[0].rolling_rounds
+        lines.append(f"验证方式: {rounds}轮滚动窗口验证\n")
+
+    for rec in recommendations:
+        lines.append(f"\n## 【{rec.display_name}】({rec.symbol})")
+        lines.append(f"- **最优策略**: {rec.best_strategy_name}")
+        lines.append(f"- **期望收益(EV)**: {rec.expected_value:+.3f}%")
+        lines.append(f"- **最新价**: {rec.latest_close:.2f}\n")
+        lines.append("| 策略 | EV | 胜率 | 总收益 | 盈亏比 | 信号 |")
+        lines.append("|---|---|---|---|---|---|")
+
+        sorted_results = sorted(
+            rec.strategy_results,
+            key=lambda r: r.expected_value,
+            reverse=True,
+        )
+        for sr in sorted_results:
+            best_mark = "⭐" if sr.strategy_name == rec.best_strategy_name else ""
+            signal = ""
+            if sr.latest_buy_signal:
+                signal = "📈买入"
+            elif sr.latest_sell_signal:
+                signal = "📉卖出"
+            lines.append(
+                f"| {best_mark}{sr.strategy_name} "
+                f"| {sr.expected_value:+7.3f}% "
+                f"| {sr.avg_trade_win_rate:5.1f}% "
+                f"| {sr.sum_return:+7.2f}% "
+                f"| {sr.avg_profit_factor:5.2f} "
+                f"| {signal} |"
+            )
+
+    lines.append("\n---")
+    lines.append("💡 EV>0 表示该策略长期数学期望为正，适合真实交易")
+    lines.append("⚠️ 免责声明: 以上分析仅供参考，不构成投资建议")
+
+    filepath.write_text("\n".join(lines), encoding="utf-8")
+    logger.info("策略穷举对比已保存: %s", filepath)
+    print(f"  📄 策略穷举对比 Markdown 已保存: {filepath}")
 
 
 class BacktestValidator:

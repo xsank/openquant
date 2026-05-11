@@ -31,8 +31,8 @@ python -m openquant.main recommend \
     us_stock:105.MU:美光科技 \
     us_stock:106.NEM:纽蒙特矿业 \
     us_stock:106.IONQ:IonQ \
-    us_stock:106.YANG:中国3倍做空ETF \
-    us_stock:106.MP:MP_Materials \
+    us_stock:107.YANG:YANG做空 \
+    us_stock:106.MP:MP \
   --train-weeks 20 \
   --rolling-rounds 15 \
   --datasource multi_source \
