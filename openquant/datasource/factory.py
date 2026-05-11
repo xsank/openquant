@@ -51,5 +51,9 @@ class DataSourceFactory:
         """注册默认数据源"""
         from openquant.datasource.baostock_source import BaostockDataSource
         from openquant.datasource.akshare_source import AkshareDataSource
+        from openquant.datasource.yfinance_source import YFinanceDataSource
+        from openquant.datasource.multi_source import MultiSourceDataSource
         cls.register("baostock", BaostockDataSource)
         cls.register("akshare", AkshareDataSource)
+        cls.register("yfinance", YFinanceDataSource)
+        cls.register("multi_source", MultiSourceDataSource)

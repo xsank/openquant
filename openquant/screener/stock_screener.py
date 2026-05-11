@@ -111,7 +111,7 @@ class StockScreener:
     def __init__(
         self,
         strategy_registry: dict,
-        datasource_name: str = "akshare",
+        datasource_name: str = "multi_source",
         initial_capital: float = 100000.0,
         train_weeks: int = 20,
         rolling_rounds: int = 15,
@@ -945,7 +945,7 @@ class BacktestValidator:
     def __init__(
         self,
         strategy_registry: dict,
-        datasource_name: str = "akshare",
+        datasource_name: str = "multi_source",
         initial_capital: float = 100000.0,
         train_weeks: int = 20,
         rolling_rounds: int = 15,

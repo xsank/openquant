@@ -16,6 +16,7 @@ import requests
 from openquant.core.exceptions import DataSourceError
 from openquant.core.interfaces import DataSourceInterface
 from openquant.core.models import FrequencyType, MarketType
+from openquant.datasource.retry import RetryExhaustedError, retry_fetch
 
 logger = logging.getLogger(__name__)
 
@@ -147,11 +148,25 @@ class AkshareDataSource(DataSourceInterface):
             for fetch_start, fetch_end in fetch_ranges:
                 logger.debug("增量获取: %s (%s ~ %s)", symbol, fetch_start, fetch_end)
                 try:
-                    df_part = fetcher(symbol, fetch_start, fetch_end)
+                    df_part = retry_fetch(
+                        fetcher, symbol, fetch_start, fetch_end,
+                        symbol=symbol,
+                        retryable_exceptions=(
+                            DataSourceError,
+                            ConnectionError,
+                            requests.exceptions.ConnectionError,
+                            requests.exceptions.Timeout,
+                        ),
+                    )
                     if df_part is not None and not df_part.empty:
                         incremental_frames.append(df_part)
+                except RetryExhaustedError:
+                    logger.warning(
+                        "增量获取重试耗尽，跳过: %s (%s ~ %s)",
+                        symbol, fetch_start, fetch_end,
+                    )
+                    continue
                 except DataSourceError:
-                    # 增量段获取失败（如周末/节假日无数据），跳过该段
                     logger.debug("增量段无数据，跳过: %s (%s ~ %s)", symbol, fetch_start, fetch_end)
                     continue
 

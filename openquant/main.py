@@ -681,7 +681,7 @@ def main() -> None:
     recommend_parser.add_argument("--train-weeks", type=int, default=20, help="训练窗口周数（默认20周）")
     recommend_parser.add_argument("--rolling-rounds", type=int, default=15, help="滚动验证轮数（默认15轮）")
     recommend_parser.add_argument("--end-date", default=None, help="结束日期 (YYYY-MM-DD)，默认今天")
-    recommend_parser.add_argument("--datasource", default="akshare", help="数据源名称")
+    recommend_parser.add_argument("--datasource", default="multi_source", help="数据源名称（默认multi_source，支持多源降级）")
     recommend_parser.add_argument("--capital", type=float, default=100000, help="初始资金")
 
     # 回测验证命令
@@ -695,7 +695,7 @@ def main() -> None:
     validate_parser.add_argument("--validation-weeks", type=int, default=20, help="验证窗口周数（默认20周）")
     validate_parser.add_argument("--buy-thresholds", default="40,50,60,70,80", help="买入阈值列表，逗号分隔（默认40,50,60,70,80）")
     validate_parser.add_argument("--sell-thresholds", default="40,50,60,70,80", help="卖出阈值列表，逗号分隔（默认40,50,60,70,80）")
-    validate_parser.add_argument("--datasource", default="akshare", help="数据源名称")
+    validate_parser.add_argument("--datasource", default="multi_source", help="数据源名称（默认multi_source，支持多源降级）")
     validate_parser.add_argument("--capital", type=float, default=100000, help="初始资金")
 
     # 参数优化命令
