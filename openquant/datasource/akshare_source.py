@@ -139,6 +139,10 @@ class AkshareDataSource(DataSourceInterface):
         fetch_ranges = _calc_incremental_ranges(symbol, start_date, end_date, market)
         has_existing_cache = _get_cache_path(symbol, market).exists()
 
+        # ---- 增量段合法性预检：在发起网络请求前判断增量段是否有可能获取到数据 ----
+        if has_existing_cache and fetch_ranges:
+            _validate_incremental_ranges(symbol, fetch_ranges, market)
+
         try:
             fetcher = _DAILY_FETCHERS.get(market)
             if fetcher is None:
@@ -146,11 +150,14 @@ class AkshareDataSource(DataSourceInterface):
 
             incremental_frames = []
             for fetch_start, fetch_end in fetch_ranges:
-                logger.debug("增量获取: %s (%s ~ %s)", symbol, fetch_start, fetch_end)
+                logger.info("增量获取: %s (%s ~ %s)", symbol, fetch_start, fetch_end)
                 try:
                     df_part = retry_fetch(
                         fetcher, symbol, fetch_start, fetch_end,
                         symbol=symbol,
+                        max_retries=3,
+                        base_delay=2.0,
+                        max_delay=10.0,
                         retryable_exceptions=(
                             DataSourceError,
                             ConnectionError,
@@ -160,12 +167,11 @@ class AkshareDataSource(DataSourceInterface):
                     )
                     if df_part is not None and not df_part.empty:
                         incremental_frames.append(df_part)
-                except RetryExhaustedError:
-                    logger.warning(
-                        "增量获取重试耗尽，跳过: %s (%s ~ %s)",
-                        symbol, fetch_start, fetch_end,
-                    )
-                    continue
+                except RetryExhaustedError as exc:
+                    # 增量获取重试耗尽，直接抛出让 multi_source 尝试备用源
+                    raise DataSourceError(
+                        f"AKShare 增量获取失败(重试3次): {symbol} ({fetch_start}~{fetch_end})"
+                    ) from exc
                 except DataSourceError:
                     logger.debug("增量段无数据，跳过: %s (%s ~ %s)", symbol, fetch_start, fetch_end)
                     continue
@@ -290,42 +296,93 @@ class AkshareDataSource(DataSourceInterface):
     ) -> dict:
         try:
             if market == MarketType.A_SHARE:
-                df = ak.stock_zh_a_spot_em()
-                row = df[df["代码"] == symbol]
-                if row.empty:
-                    raise DataSourceError(f"未找到股票: {symbol}")
-                row = row.iloc[0]
+                # 优先：东方财富 push2 实时接口（不依赖被封的 spot_em 批量接口）
+                # secid 格式: 沪市=1.代码, 深市/创业板=0.代码
+                market_code = 1 if symbol.startswith("6") else 0
+                try:
+                    realtime_url = (
+                        f"https://push2.eastmoney.com/api/qt/stock/get"
+                        f"?secid={market_code}.{symbol}"
+                        f"&fields=f43,f44,f45,f46,f47,f48,f55,f57,f58,f60,f170"
+                    )
+                    resp = requests.get(realtime_url, headers=_EASTMONEY_HEADERS, timeout=8)
+                    data = resp.json().get("data", {})
+                    if data and data.get("f43"):
+                        divisor = 100  # A股 push2 价格单位是 0.01 元
+                        return {
+                            "symbol": symbol,
+                            "name": data.get("f58", ""),
+                            "price": data["f43"] / divisor,
+                            "change_pct": (data.get("f170") or 0) / 100,
+                            "volume": float(data.get("f47", 0)),
+                            "amount": float(data.get("f48", 0)),
+                            "high": (data.get("f44") or 0) / divisor,
+                            "low": (data.get("f45") or 0) / divisor,
+                            "open": (data.get("f46") or 0) / divisor,
+                            "prev_close": (data.get("f60") or 0) / divisor,
+                        }
+                except Exception as exc:
+                    logger.debug("A股 push2 实时接口失败: %s，降级新浪源", exc)
+                # 降级：通过新浪源获取最新一条
+                sina_symbol = _to_sina_a_share_symbol(symbol)
+                df = ak.stock_zh_a_daily(symbol=sina_symbol, adjust="qfq")
+                if df is None or df.empty:
+                    raise DataSourceError(f"未获取到A股行情: {symbol}")
+                row = df.iloc[-1]
                 return {
                     "symbol": symbol,
-                    "name": row.get("名称", ""),
-                    "price": float(row.get("最新价", 0)),
-                    "change_pct": float(row.get("涨跌幅", 0)),
-                    "volume": float(row.get("成交量", 0)),
-                    "amount": float(row.get("成交额", 0)),
-                    "high": float(row.get("最高", 0)),
-                    "low": float(row.get("最低", 0)),
-                    "open": float(row.get("今开", 0)),
-                    "prev_close": float(row.get("昨收", 0)),
+                    "name": "",
+                    "price": float(row.get("close", 0)),
+                    "change_pct": 0.0,
+                    "volume": float(row.get("volume", 0)),
+                    "amount": float(row.get("amount", 0)),
+                    "high": float(row.get("high", 0)),
+                    "low": float(row.get("low", 0)),
+                    "open": float(row.get("open", 0)),
+                    "prev_close": float(row.get("close", 0)),
                 }
             elif market == MarketType.HK_STOCK:
-                from datetime import datetime as dt, timedelta
-                end = dt.now().strftime("%Y%m%d")
-                start = (dt.now() - timedelta(days=7)).strftime("%Y%m%d")
-                df = ak.stock_hk_hist(symbol=symbol, period="daily", start_date=start, end_date=end, adjust="qfq")
-                if df.empty:
+                # 优先：东方财富 push2 实时接口（不依赖被封的 push2his）
+                try:
+                    realtime_url = (
+                        f"https://push2.eastmoney.com/api/qt/stock/get"
+                        f"?secid=116.{symbol}"
+                        f"&fields=f43,f44,f45,f46,f47,f48,f55,f57,f58,f60,f170"
+                    )
+                    resp = requests.get(realtime_url, headers=_EASTMONEY_HEADERS, timeout=8)
+                    data = resp.json().get("data", {})
+                    if data and data.get("f43"):
+                        divisor = 1000  # push2 返回的价格单位是 0.001 元
+                        return {
+                            "symbol": symbol,
+                            "name": data.get("f58", ""),
+                            "price": data["f43"] / divisor,
+                            "change_pct": (data.get("f170") or 0) / 100,
+                            "volume": float(data.get("f47", 0)),
+                            "amount": float(data.get("f48", 0)),
+                            "high": (data.get("f44") or 0) / divisor,
+                            "low": (data.get("f45") or 0) / divisor,
+                            "open": (data.get("f46") or 0) / divisor,
+                            "prev_close": (data.get("f60") or 0) / divisor,
+                        }
+                except Exception as exc:
+                    logger.debug("港股 push2 实时接口失败: %s，降级新浪源", exc)
+                # 降级：通过新浪源获取最新一条
+                df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
+                if df is None or df.empty:
                     raise DataSourceError(f"未获取到港股行情: {symbol}")
                 row = df.iloc[-1]
                 return {
                     "symbol": symbol,
                     "name": "",
-                    "price": float(row.get("收盘", 0)),
-                    "change_pct": float(row.get("涨跌幅", 0)),
-                    "volume": float(row.get("成交量", 0)),
-                    "amount": float(row.get("成交额", 0)),
-                    "high": float(row.get("最高", 0)),
-                    "low": float(row.get("最低", 0)),
-                    "open": float(row.get("开盘", 0)),
-                    "prev_close": float(row.get("收盘", 0)),
+                    "price": float(row.get("close", 0)),
+                    "change_pct": 0.0,
+                    "volume": float(row.get("volume", 0)),
+                    "amount": float(row.get("amount", 0)),
+                    "high": float(row.get("high", 0)),
+                    "low": float(row.get("low", 0)),
+                    "open": float(row.get("open", 0)),
+                    "prev_close": float(row.get("close", 0)),
                 }
             else:
                 raise DataSourceError(f"实时行情暂不支持市场: {market}")
@@ -353,7 +410,44 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _to_sina_a_share_symbol(symbol: str) -> str:
+    """将纯数字A股代码转为新浪格式（sh/sz前缀）。
+
+    沪市: 6开头 → sh; 深市: 0/3/2开头 → sz; 北交所: 4/8开头 → bj
+    """
+    if symbol.startswith(("sh", "sz", "bj")):
+        return symbol
+    if symbol.startswith("6"):
+        return f"sh{symbol}"
+    if symbol.startswith(("0", "3", "2")):
+        return f"sz{symbol}"
+    if symbol.startswith(("4", "8")):
+        return f"bj{symbol}"
+    return f"sz{symbol}"
+
+
 def _fetch_a_share_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """获取A股日K数据，优先新浪财经源，降级东方财富源。
+
+    新浪源 (stock_zh_a_daily) 不依赖 push2his 节点，在云服务器环境更稳定；
+    东方财富源 (stock_zh_a_hist) 走 push2his CDN，容易被封。
+    """
+    # 优先：新浪财经源（需要 sh/sz 前缀，不接受日期参数）
+    try:
+        sina_symbol = _to_sina_a_share_symbol(symbol)
+        df = ak.stock_zh_a_daily(symbol=sina_symbol, adjust="qfq")
+        if df is not None and not df.empty:
+            df = _normalize_columns(df)
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+            filtered = df[(df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)]
+            if not filtered.empty:
+                logger.debug("A股 %s 通过新浪源获取成功 (%d条)", symbol, len(filtered))
+                return filtered.reset_index(drop=True)
+    except Exception as exc:
+        logger.debug("A股 %s 新浪源获取失败: %s，降级东方财富源", symbol, exc)
+
+    # 降级：东方财富源
     df = ak.stock_zh_a_hist(
         symbol=symbol,
         period="daily",
@@ -367,6 +461,26 @@ def _fetch_a_share_daily(symbol: str, start_date: str, end_date: str) -> pd.Data
 
 
 def _fetch_hk_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """获取港股日K数据，优先新浪财经源，降级东方财富源。
+
+    新浪源 (stock_hk_daily) 不依赖 push2his 节点，在云服务器环境更稳定；
+    东方财富源 (stock_hk_hist) 走 push2his CDN，容易被封。
+    """
+    # 优先：新浪财经源（不接受日期参数，返回全量后手动过滤）
+    try:
+        df = ak.stock_hk_daily(symbol=symbol, adjust="qfq")
+        if df is not None and not df.empty:
+            df = _normalize_columns(df)
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+            filtered = df[(df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)]
+            if not filtered.empty:
+                logger.debug("港股 %s 通过新浪源获取成功 (%d条)", symbol, len(filtered))
+                return filtered.reset_index(drop=True)
+    except Exception as exc:
+        logger.debug("港股 %s 新浪源获取失败: %s，降级东方财富源", symbol, exc)
+
+    # 降级：东方财富源
     df = ak.stock_hk_hist(
         symbol=symbol,
         period="daily",
@@ -445,7 +559,39 @@ def _search_us_quote_id(symbol: str) -> str | None:
     return None
 
 
+def _extract_ticker_from_symbol(symbol: str) -> str:
+    """从带交易所前缀的美股代码中提取纯 ticker。
+
+    例如: '105.GOOG' → 'GOOG', 'BABA' → 'BABA'
+    """
+    if "." in symbol:
+        return symbol.split(".", 1)[1]
+    return symbol
+
+
 def _fetch_us_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """获取美股日K数据，优先新浪财经源，降级东方财富源。
+
+    新浪源 (stock_us_daily) 不依赖 push2his 节点，在云服务器环境更稳定；
+    东方财富源 (stock_us_hist) 走 push2his CDN，容易被封。
+    """
+    ticker = _extract_ticker_from_symbol(symbol)
+
+    # 优先：新浪财经源（使用纯 ticker，不接受日期参数）
+    try:
+        df = ak.stock_us_daily(symbol=ticker, adjust="qfq")
+        if df is not None and not df.empty:
+            df = _normalize_columns(df)
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+            filtered = df[(df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)]
+            if not filtered.empty:
+                logger.debug("美股 %s 通过新浪源获取成功 (%d条)", symbol, len(filtered))
+                return filtered.reset_index(drop=True)
+    except Exception as exc:
+        logger.debug("美股 %s 新浪源获取失败: %s，降级东方财富源", symbol, exc)
+
+    # 降级：东方财富源
     full_symbol = _resolve_us_symbol(symbol)
     df = ak.stock_us_hist(
         symbol=full_symbol,
@@ -501,6 +647,74 @@ def _get_cache_end_date(symbol: str, market: MarketType) -> pd.Timestamp | None:
         return df["datetime"].max()
     except Exception:
         return None
+
+
+def _validate_incremental_ranges(
+    symbol: str,
+    fetch_ranges: list[tuple[str, str]],
+    market: MarketType,
+) -> None:
+    """在发起网络请求前，预检增量段是否合法。
+
+    判断逻辑：
+    - 增量段的 end_date 如果 >= 今天，说明今天的数据可能尚未产生（未收盘）
+    - 增量段的起始到结束之间如果没有任何已过去的交易日，增量段不合法
+
+    不合法时友好提示并退出程序。
+    """
+    from datetime import datetime, date
+
+    today = date.today()
+
+    for fetch_start, fetch_end in fetch_ranges:
+        range_start = pd.Timestamp(fetch_start).date()
+        range_end = pd.Timestamp(fetch_end).date()
+
+        # 增量段完全在今天或未来 → 数据尚未产生
+        if range_start >= today:
+            cache_end = _get_cache_end_date(symbol, market)
+            cache_date_str = cache_end.date() if cache_end else "无缓存"
+            error_msg = (
+                f"\n{'='*60}\n"
+                f"  ⚠️  增量数据段不合法: {symbol}\n"
+                f"  增量段: {fetch_start} ~ {fetch_end}\n"
+                f"  原因: 增量起始日期 {fetch_start} >= 今天 {today}，数据尚未产生\n"
+                f"  缓存截止: {cache_date_str}\n"
+                f"  建议: 请在当日收盘后再执行，或使用前一日作为截止日期\n"
+                f"{'='*60}"
+            )
+            print(error_msg)
+            raise SystemExit(1)
+
+        # 增量段结束日期是今天且当前时间早于收盘时间(16:30)
+        # 对于不同市场收盘时间不同，统一取保守值：如果end是今天，
+        # 检查从 range_start 到 yesterday 之间是否有交易日
+        if range_end >= today:
+            yesterday = today - pd.Timedelta(days=1)
+            # 从 range_start 到 yesterday 逐天检查是否有工作日（非周末）
+            has_past_trading_day = False
+            check_date = range_start
+            while check_date <= yesterday:
+                # 周一~周五视为潜在交易日（不考虑节假日，节假日由数据源返回空处理）
+                if check_date.weekday() < 5:
+                    has_past_trading_day = True
+                    break
+                check_date += pd.Timedelta(days=1)
+
+            if not has_past_trading_day:
+                cache_end = _get_cache_end_date(symbol, market)
+                cache_date_str = cache_end.date() if cache_end else "无缓存"
+                error_msg = (
+                    f"\n{'='*60}\n"
+                    f"  ⚠️  增量数据段不合法: {symbol}\n"
+                    f"  增量段: {fetch_start} ~ {fetch_end}\n"
+                    f"  原因: 增量段内({fetch_start} ~ {yesterday})无已过去的交易日\n"
+                    f"  缓存截止: {cache_date_str}\n"
+                    f"  建议: 缓存已是最新，无需更新；或等下一个交易日收盘后再执行\n"
+                    f"{'='*60}"
+                )
+                print(error_msg)
+                raise SystemExit(1)
 
 
 def _calc_incremental_ranges(
@@ -585,9 +799,9 @@ def _load_from_cache(
     cache_end = df["datetime"].max()
 
     # 缓存的起始日期必须 <= 请求起始日期（允许5天容差，应对节假日）
-    # 缓存的结束日期必须 >= 请求结束日期 - 3天（应对最新数据延迟）
+    # 缓存的结束日期必须 >= 请求结束日期（严格匹配，不足则触发增量获取）
     start_covered = cache_start <= request_start + pd.Timedelta(days=5)
-    end_covered = cache_end >= request_end - pd.Timedelta(days=3)
+    end_covered = cache_end >= request_end
 
     if not (start_covered and end_covered):
         logger.debug(

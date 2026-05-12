@@ -174,7 +174,12 @@ class StockScreener:
         DataSourceFactory.register_defaults()
 
         if end_date is None:
-            end_date = datetime.now().strftime("%Y-%m-%d")
+            # 使用最后一个已收盘的交易日，避免请求尚未产生的数据
+            # 从昨天开始往前找第一个工作日（周一~周五）
+            candidate = datetime.now() - timedelta(days=1)
+            while candidate.weekday() >= 5:  # 5=周六, 6=周日
+                candidate -= timedelta(days=1)
+            end_date = candidate.strftime("%Y-%m-%d")
 
         start_date = (
             datetime.strptime(end_date, "%Y-%m-%d")
