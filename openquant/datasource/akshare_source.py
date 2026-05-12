@@ -174,25 +174,26 @@ class AkshareDataSource(DataSourceInterface):
                 # 完全无缓存且网络也获取不到数据
                 raise DataSourceError(f"获取数据失败: {symbol} ({start_date} ~ {end_date})")
 
+            # 增量获取全部失败且有缓存：检查缓存是否足够新
+            if not incremental_frames and has_existing_cache:
+                cache_end = _get_cache_end_date(symbol, market)
+                request_end_ts = pd.Timestamp(end_date)
+                if cache_end is not None and (request_end_ts - cache_end).days > 1:
+                    # 缓存数据过期超过1个交易日，抛异常让 multi_source 尝试备用源增量补充
+                    raise DataSourceError(
+                        f"AKShare 增量获取失败且缓存过期: {symbol} "
+                        f"(缓存截止{cache_end.date()}, 请求截止{end_date})"
+                    )
+
             # 合并增量数据到缓存
             if incremental_frames:
                 incremental_df = pd.concat(incremental_frames, ignore_index=True)
                 _save_to_cache(symbol, incremental_df, market)
 
         except DataSourceError:
-            # 如果已有缓存，增量获取失败时降级使用已有缓存
-            if has_existing_cache:
-                fallback = _load_from_cache_relaxed(symbol, start_date, end_date, market)
-                if fallback is not None:
-                    logger.info("增量获取失败，降级使用已有缓存: %s", symbol)
-                    return fallback
+            # 不降级，直接抛出让 multi_source 处理
             raise
         except Exception as exc:
-            if has_existing_cache:
-                fallback = _load_from_cache_relaxed(symbol, start_date, end_date, market)
-                if fallback is not None:
-                    logger.info("增量获取异常，降级使用已有缓存: %s", symbol)
-                    return fallback
             raise DataSourceError(f"AKShare 获取日K线失败: {exc}") from exc
 
         # 从更新后的缓存中读取完整请求范围的数据
@@ -486,6 +487,20 @@ def _get_cache_path(symbol: str, market: MarketType) -> Path:
     """获取缓存文件路径: data/cache/{market}/{symbol}.csv"""
     safe_symbol = symbol.replace(".", "_").replace("/", "_")
     return _CACHE_DIR / market.value / f"{safe_symbol}.csv"
+
+
+def _get_cache_end_date(symbol: str, market: MarketType) -> pd.Timestamp | None:
+    """获取缓存数据的最后日期，用于判断缓存是否过期"""
+    cache_path = _get_cache_path(symbol, market)
+    if not cache_path.exists():
+        return None
+    try:
+        df = pd.read_csv(cache_path, parse_dates=["datetime"])
+        if df.empty:
+            return None
+        return df["datetime"].max()
+    except Exception:
+        return None
 
 
 def _calc_incremental_ranges(

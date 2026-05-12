@@ -36,7 +36,7 @@ python -m openquant.main recommend \
   --train-weeks 20 \
   --rolling-rounds 15 \
   --datasource multi_source \
-  --capital 500000 \
+  --capital 1000000 \
   --position-ratio auto
 
 echo ""

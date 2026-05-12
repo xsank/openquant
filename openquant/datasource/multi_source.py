@@ -75,11 +75,20 @@ class MultiSourceDataSource(DataSourceInterface):
         self._ensure_sources()
 
         errors: list[str] = []
+        akshare_cache_end: pd.Timestamp | None = None
+
         for source in self._sources:
             if market not in source.get_supported_markets():
                 continue
 
             source_name = source.get_name()
+
+            # yfinance 作为备用源时，仅获取增量部分
+            if source_name != "akshare" and akshare_cache_end is not None:
+                return self._fetch_increment_from_fallback(
+                    source, symbol, start_date, end_date, market, akshare_cache_end
+                )
+
             try:
                 logger.info(
                     "[%s] 尝试通过 %s 获取数据: %s (%s ~ %s)",
@@ -117,6 +126,10 @@ class MultiSourceDataSource(DataSourceInterface):
                     "[%s] %s 获取失败: %s，尝试下一个数据源",
                     symbol, source_name, exc,
                 )
+                # 记录 akshare 缓存末尾日期，供备用源增量使用
+                if source_name == "akshare":
+                    from openquant.datasource.akshare_source import _get_cache_end_date
+                    akshare_cache_end = _get_cache_end_date(symbol, market)
                 continue
             except Exception as exc:
                 error_msg = f"{source_name}: {type(exc).__name__}: {exc}"
@@ -125,6 +138,9 @@ class MultiSourceDataSource(DataSourceInterface):
                     "[%s] %s 获取异常: %s，尝试下一个数据源",
                     symbol, source_name, exc,
                 )
+                if source_name == "akshare":
+                    from openquant.datasource.akshare_source import _get_cache_end_date
+                    akshare_cache_end = _get_cache_end_date(symbol, market)
                 continue
 
         # 所有数据源均失败
@@ -132,6 +148,106 @@ class MultiSourceDataSource(DataSourceInterface):
         raise DataSourceError(
             f"所有数据源获取 {symbol} 均失败 ({start_date}~{end_date}): {all_errors}"
         )
+
+    def _fetch_increment_from_fallback(
+        self,
+        source: DataSourceInterface,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        market: MarketType,
+        cache_end: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """用备用源仅获取增量部分，并严格校验属性一致性后合并到缓存
+
+        如果增量数据属性与缓存不一致，友好提示并终止程序。
+        """
+        from openquant.datasource.akshare_source import (
+            _get_cache_path,
+            _load_from_cache_relaxed,
+        )
+
+        source_name = source.get_name()
+        increment_start = (cache_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        logger.info(
+            "[%s] 通过 %s 仅获取增量数据: %s ~ %s (缓存截止%s)",
+            symbol, source_name, increment_start, end_date, cache_end.date(),
+        )
+
+        # 读取现有缓存
+        cache_path = _get_cache_path(symbol, market)
+        existing_df = pd.read_csv(cache_path, parse_dates=["datetime"])
+        existing_columns = set(existing_df.columns)
+
+        try:
+            increment_df = source.fetch_daily_bars(
+                symbol, increment_start, end_date, market
+            )
+        except Exception as exc:
+            # 备用源也失败，友好提示并终止
+            error_msg = (
+                f"\n{'='*60}\n"
+                f"  ❌ 数据获取失败: {symbol}\n"
+                f"  主源(akshare)增量获取失败，备用源({source_name})也失败\n"
+                f"  缓存数据截止: {cache_end.date()}，请求截止: {end_date}\n"
+                f"  错误: {exc}\n"
+                f"  建议: 请稍后重试，或检查网络连接\n"
+                f"{'='*60}"
+            )
+            print(error_msg)
+            raise SystemExit(1)
+
+        if increment_df is None or increment_df.empty:
+            # 增量为空，可能非交易日，使用已有缓存
+            logger.info("[%s] 增量数据为空(可能非交易日)，使用已有缓存", symbol)
+            fallback = _load_from_cache_relaxed(symbol, start_date, end_date, market)
+            if fallback is not None:
+                return fallback
+            raise DataSourceError(f"增量数据为空且缓存不可用: {symbol}")
+
+        # 严格属性一致性校验：增量数据的列必须和缓存完全一致
+        increment_columns = set(increment_df.columns)
+        missing_in_increment = existing_columns - increment_columns
+        extra_in_increment = increment_columns - existing_columns
+
+        if missing_in_increment:
+            error_msg = (
+                f"\n{'='*60}\n"
+                f"  ❌ 增量数据属性不一致: {symbol}\n"
+                f"  备用源({source_name})返回的数据缺少以下属性:\n"
+                f"    {missing_in_increment}\n"
+                f"  缓存数据包含的属性: {sorted(existing_columns)}\n"
+                f"  增量数据包含的属性: {sorted(increment_columns)}\n"
+                f"  为保证数据一致性，不做增量更新。\n"
+                f"  建议: 请等待主源(akshare)恢复后重试\n"
+                f"{'='*60}"
+            )
+            print(error_msg)
+            raise SystemExit(1)
+
+        # 仅保留缓存中已有的列（去掉多余列），确保格式统一
+        increment_df = increment_df[list(existing_columns)]
+
+        # 合并并去重
+        combined = pd.concat([existing_df, increment_df], ignore_index=True)
+        combined["datetime"] = pd.to_datetime(combined["datetime"])
+        combined = combined.drop_duplicates(subset=["datetime"], keep="last")
+        combined = combined.sort_values("datetime").reset_index(drop=True)
+
+        # 写入缓存
+        self._save_fallback_to_cache(symbol, combined, market)
+        new_end = combined["datetime"].max()
+        logger.info(
+            "[%s] 通过 %s 增量补充成功，数据更新至 %s (+%d条)",
+            symbol, source_name, new_end.date(), len(increment_df),
+        )
+
+        # 按请求范围过滤返回
+        request_start = pd.Timestamp(start_date)
+        request_end = pd.Timestamp(end_date)
+        mask = (combined["datetime"] >= request_start) & (combined["datetime"] <= request_end)
+        return combined[mask].reset_index(drop=True)
 
     @staticmethod
     def _save_fallback_to_cache(
