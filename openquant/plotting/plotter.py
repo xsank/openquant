@@ -21,10 +21,27 @@ logger = logging.getLogger(__name__)
 # 配置中文字体支持
 import matplotlib.font_manager as fm
 
-_CHINESE_FONT_PATH = "/usr/share/fonts/google-droid/DroidSansFallback.ttf"
-_CHINESE_FONT_PROP = fm.FontProperties(fname=_CHINESE_FONT_PATH)
-fm.fontManager.addfont(_CHINESE_FONT_PATH)
-_FONT_NAME = _CHINESE_FONT_PROP.get_name()
+_CANDIDATE_FONTS = [
+    "/usr/share/fonts/google-droid/DroidSansFallback.ttf",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+]
+
+_FONT_NAME = None
+for _path in _CANDIDATE_FONTS:
+    if Path(_path).exists():
+        try:
+            _prop = fm.FontProperties(fname=_path)
+            fm.fontManager.addfont(_path)
+            _FONT_NAME = _prop.get_name()
+            break
+        except Exception:
+            continue
+
+if _FONT_NAME is None:
+    logger.warning("未找到中文字体，图表中文可能显示为方块")
+    _FONT_NAME = "DejaVu Sans"
 
 plt.rcParams["font.sans-serif"] = [_FONT_NAME, "DejaVu Sans", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
