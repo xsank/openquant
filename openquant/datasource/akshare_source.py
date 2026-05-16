@@ -109,6 +109,50 @@ def _patch_requests_for_eastmoney():
 _patch_requests_for_eastmoney()
 
 
+def _patch_akshare_us_sina():
+    """修复 akshare stock_us_daily 在 numpy>=2.0 下的兼容性问题。
+
+    akshare stock_us_sina.py 第167行直接对 DatetimeIndex.values 赋值：
+        new_range.index.values[0] = pd.to_datetime(...)
+    numpy 2.x 中 DatetimeIndex.values 返回只读数组，触发 ValueError。
+    此 patch 用 .copy() 创建可写副本来规避。
+    """
+    try:
+        from akshare.stock import stock_us_sina
+        _original_fn = stock_us_sina.stock_us_daily
+
+        import functools
+
+        @functools.wraps(_original_fn)
+        def _patched_stock_us_daily(symbol="", adjust=""):
+            if adjust == "" or not adjust:
+                return _original_fn(symbol=symbol, adjust=adjust)
+
+            import numpy as np
+            _orig_values_property = pd.DatetimeIndex.values.fget
+
+            def _writable_values(self):
+                arr = _orig_values_property(self)
+                if not arr.flags.writeable:
+                    return arr.copy()
+                return arr
+
+            pd.DatetimeIndex.values = property(_writable_values)
+            try:
+                return _original_fn(symbol=symbol, adjust=adjust)
+            finally:
+                pd.DatetimeIndex.values = property(_orig_values_property)
+
+        stock_us_sina.stock_us_daily = _patched_stock_us_daily
+        ak.stock_us_daily = _patched_stock_us_daily
+        logger.debug("已修补 akshare stock_us_daily numpy 2.x 兼容性问题")
+    except Exception as exc:
+        logger.debug("修补 akshare stock_us_daily 失败: %s", exc)
+
+
+_patch_akshare_us_sina()
+
+
 class AkshareDataSource(DataSourceInterface):
     """AKShare 数据源，支持 A 股、港股、美股、基金等多市场
 

@@ -2,10 +2,15 @@
 
 基于 yfinance 库获取美股、港股行情数据，作为东方财富(akshare)的备用数据源。
 支持与 akshare 相同的缓存目录和数据格式，确保数据可互通。
+
+代理配置：Yahoo Finance 在中国大陆被封锁，需要通过代理访问。
+设置环境变量 HTTPS_PROXY 或 HTTP_PROXY 即可，例如:
+  export HTTPS_PROXY=http://127.0.0.1:7890
 """
 from __future__ import annotations
 
 import logging
+import os
 
 import pandas as pd
 import yfinance as yf
@@ -16,6 +21,11 @@ from openquant.core.models import FrequencyType, MarketType
 from openquant.datasource.retry import get_global_throttle
 
 logger = logging.getLogger(__name__)
+
+
+def _get_proxy() -> str | None:
+    """从环境变量获取代理配置"""
+    return os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("https_proxy") or os.environ.get("http_proxy")
 
 # 必须包含的列（与 akshare_source 保持一致）
 _REQUIRED_COLUMNS = {"datetime", "open", "high", "low", "close", "volume"}
@@ -122,13 +132,15 @@ class YFinanceDataSource(DataSourceInterface):
 
         try:
             throttle.wait()
-            stock = yf.Ticker(ticker)
+            proxy = _get_proxy()
+            stock = yf.Ticker(ticker, proxy=proxy)
             # yfinance 的 end 是 exclusive，需要加一天
             end_dt = pd.Timestamp(end_date) + pd.Timedelta(days=1)
             df = stock.history(
                 start=start_date,
                 end=end_dt.strftime("%Y-%m-%d"),
                 auto_adjust=True,
+                proxy=proxy,
             )
             throttle.mark()
 
@@ -182,7 +194,8 @@ class YFinanceDataSource(DataSourceInterface):
 
         try:
             throttle.wait()
-            stock = yf.Ticker(ticker)
+            proxy = _get_proxy()
+            stock = yf.Ticker(ticker, proxy=proxy)
             info = stock.info
             throttle.mark()
 

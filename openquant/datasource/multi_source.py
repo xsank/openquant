@@ -186,13 +186,20 @@ class MultiSourceDataSource(DataSourceInterface):
             )
         except Exception as exc:
             # 备用源也失败，友好提示并终止
+            import os
+            proxy_hint = ""
+            if not (os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")):
+                proxy_hint = (
+                    "\n  提示: Yahoo Finance 在中国大陆需代理访问，请设置环境变量:\n"
+                    "        export HTTPS_PROXY=http://127.0.0.1:7890"
+                )
             error_msg = (
                 f"\n{'='*60}\n"
-                f"  ❌ 数据获取失败: {symbol}\n"
+                f"  数据获取失败: {symbol}\n"
                 f"  主源(akshare)增量获取失败，备用源({source_name})也失败\n"
                 f"  缓存数据截止: {cache_end.date()}，请求截止: {end_date}\n"
-                f"  错误: {exc}\n"
-                f"  建议: 请稍后重试，或检查网络连接\n"
+                f"  错误: {exc}{proxy_hint}\n"
+                f"  建议: 请稍后重试，或检查网络/代理配置\n"
                 f"{'='*60}"
             )
             print(error_msg)
